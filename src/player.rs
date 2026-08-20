@@ -52,6 +52,7 @@ pub struct Player {
     volume_bounds: Bounds<Pixels>,
     dragging: Option<DragTarget>,
     scrub: Option<f32>,
+    hover_seek: Option<f32>,
     load_generation: u64,
     dialog_open: bool,
     subtitles: Option<SubtitleSession>,
@@ -84,6 +85,7 @@ impl Player {
             volume_bounds: Bounds::default(),
             dragging: None,
             scrub: None,
+            hover_seek: None,
             load_generation: 0,
             dialog_open: false,
             subtitles: None,
@@ -328,8 +330,10 @@ impl Player {
         if duration.is_zero() {
             return;
         }
-        let nanos = (duration.as_secs_f64() * ratio.clamp(0.0, 1.0) as f64) as u64;
-        let _ = video.seek(Duration::from_nanos(nanos), accurate);
+        let target = Duration::from_secs_f64(duration.as_secs_f64() * ratio.clamp(0.0, 1.0) as f64);
+        if let Err(err) = video.seek(target, accurate) {
+            log::warn!("seek failed: {err}");
+        }
         cx.notify();
     }
 
@@ -502,11 +506,42 @@ impl Player {
         ((f32::from(x) - f32::from(bounds.origin.x)) / width).clamp(0.0, 1.0)
     }
 
+    fn hover_seek_ratio(&self, window: &Window) -> Option<f32> {
+        if self.dragging == Some(DragTarget::Seek) {
+            return self.scrub;
+        }
+        if self.video.is_none() {
+            return None;
+        }
+        if let Some(ratio) = self.hover_seek {
+            return Some(ratio);
+        }
+        let pos = window.mouse_position();
+        if self.seek_bounds.contains(&pos) {
+            Some(Self::ratio_at(self.seek_bounds, pos.x))
+        } else {
+            None
+        }
+    }
+
+    fn update_hover_seek(&mut self, position: Point<Pixels>) {
+        if self.dragging == Some(DragTarget::Seek) {
+            return;
+        }
+        self.hover_seek = if self.video.is_some() && self.seek_bounds.contains(&position) {
+            Some(Self::ratio_at(self.seek_bounds, position.x))
+        } else {
+            None
+        };
+    }
+
     fn on_pointer_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         self.bump_interaction();
         match self.dragging {
             Some(DragTarget::Seek) => {
-                self.scrub = Some(Self::ratio_at(self.seek_bounds, event.position.x));
+                let ratio = Self::ratio_at(self.seek_bounds, event.position.x);
+                self.scrub = Some(ratio);
+                self.hover_seek = Some(ratio);
                 cx.notify();
             }
             Some(DragTarget::Volume) => {
@@ -515,7 +550,10 @@ impl Player {
                     cx,
                 );
             }
-            None => cx.notify(),
+            None => {
+                self.update_hover_seek(event.position);
+                cx.notify();
+            }
         }
     }
 
@@ -526,7 +564,7 @@ impl Player {
                     .scrub
                     .unwrap_or_else(|| Self::ratio_at(self.seek_bounds, position.x));
                 self.scrub = None;
-                self.seek_ratio(ratio, true, cx);
+                self.seek_ratio(ratio, false, cx);
             }
             Some(DragTarget::Volume) => {
                 self.set_volume(Self::ratio_at(self.volume_bounds, position.x) as f64, cx);
@@ -536,11 +574,16 @@ impl Player {
     }
 
     fn begin_seek(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        if self.video.is_none() {
+            return;
+        }
         self.bump_interaction();
         self.dragging = Some(DragTarget::Seek);
         let ratio = Self::ratio_at(self.seek_bounds, event.position.x);
         self.scrub = Some(ratio);
-        self.seek_ratio(ratio, true, cx);
+        self.hover_seek = Some(ratio);
+        self.seek_ratio(ratio, false, cx);
+        cx.stop_propagation();
     }
 
     fn begin_volume(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
@@ -1157,7 +1200,7 @@ impl Player {
             .block_mouse_except_scroll()
             .flex()
             .flex_col()
-            .child(self.render_seek_bar(progress, entity.clone(), cx))
+            .child(self.render_seek_bar(progress, entity.clone(), window, cx))
             .child(
                 div()
                     .id("control-bar")
@@ -1278,70 +1321,130 @@ impl Player {
         &self,
         progress: f32,
         entity: gpui::Entity<Self>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let scrubbing = self.dragging == Some(DragTarget::Seek);
+        let hover_ratio = self.hover_seek_ratio(window);
+        let hovering = hover_ratio.is_some() || scrubbing;
         let knob_size = px(13.);
+        let duration = self
+            .video
+            .as_ref()
+            .map(|video| video.duration())
+            .unwrap_or(Duration::ZERO);
+        let tooltip = hover_ratio.filter(|_| !duration.is_zero()).map(|ratio| {
+            let label = format_duration(Duration::from_secs_f64(
+                duration.as_secs_f64() * ratio as f64,
+            ));
+            let bar_width = f32::from(self.seek_bounds.size.width);
+            let chip_width = label.len() as f32 * 7.2 + 16.0;
+            let left = if bar_width <= 1.0 {
+                0.0
+            } else {
+                (ratio * bar_width - chip_width / 2.0).clamp(0.0, (bar_width - chip_width).max(0.0))
+            };
+            (label, left)
+        });
 
         div()
             .id("seek-bar")
-            .group("seek")
             .relative()
             .w_full()
-            .h(px(16.))
+            .h(px(24.))
             .px_3()
             .flex()
-            .items_center()
+            .flex_col()
+            .justify_center()
+            .occlude()
             .cursor(CursorStyle::PointingHand)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event, _, cx| this.begin_seek(event, cx)),
             )
-            .child(
-                canvas(
-                    move |bounds, _, cx| {
-                        entity.update(cx, |this, _cx| {
-                            this.seek_bounds = bounds;
-                        });
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .size_full(),
-            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                this.update_hover_seek(event.position);
+                cx.notify();
+            }))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered && this.dragging != Some(DragTarget::Seek) {
+                    this.hover_seek = None;
+                    cx.notify();
+                }
+            }))
             .child(
                 div()
                     .relative()
                     .w_full()
-                    .h(px(3.))
-                    .rounded_full()
-                    .bg(theme::progress_track())
-                    .group_hover("seek", |style| style.h(px(5.)))
-                    .when(scrubbing, |this| this.h(px(5.)))
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .justify_center()
                     .child(
-                        div()
-                            .h_full()
-                            .w(gpui::relative(progress))
-                            .rounded_full()
-                            .bg(theme::progress()),
+                        canvas(
+                            move |bounds, _, cx| {
+                                entity.update(cx, |this, cx| {
+                                    let was_empty = this.seek_bounds.size.width < px(1.);
+                                    this.seek_bounds = bounds;
+                                    if was_empty && bounds.size.width > px(1.) {
+                                        cx.notify();
+                                    }
+                                });
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .bottom_0(),
                     )
+                    .when_some(tooltip, |this, (label, left)| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .top(px(-22.))
+                                .left(px(left))
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .bg(theme::seek_tooltip())
+                                .text_xs()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme::white())
+                                .whitespace_nowrap()
+                                .child(label),
+                        )
+                    })
                     .child(
                         div()
-                            .absolute()
-                            .top(px(-5.))
-                            .flex()
+                            .relative()
                             .w_full()
-                            .child(div().w(gpui::relative(progress)))
+                            .h(if hovering { px(5.) } else { px(3.) })
+                            .rounded_full()
+                            .bg(theme::progress_track())
                             .child(
                                 div()
-                                    .ml(px(-6.5))
-                                    .size(knob_size)
+                                    .h_full()
+                                    .w(gpui::relative(progress))
                                     .rounded_full()
-                                    .bg(theme::progress())
-                                    .when(!scrubbing, |this| {
-                                        this.opacity(0.)
-                                            .group_hover("seek", |style| style.opacity(1.))
-                                    }),
+                                    .bg(theme::progress()),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top(px(if hovering { -4. } else { -5. }))
+                                    .flex()
+                                    .w_full()
+                                    .child(div().w(gpui::relative(progress)))
+                                    .child(
+                                        div()
+                                            .ml(px(-6.5))
+                                            .size(knob_size)
+                                            .rounded_full()
+                                            .bg(theme::progress())
+                                            .opacity(if hovering { 1. } else { 0. }),
+                                    ),
                             ),
                     ),
             )

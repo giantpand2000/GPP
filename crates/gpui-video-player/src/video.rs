@@ -220,49 +220,12 @@ impl Internal {
 
         // Clear EOS so the worker resumes pulling after a seek.
         self.is_eos.store(false, Ordering::SeqCst);
-
-        // Build seek flags. When not accurate, snap in the playback direction to
-        // avoid jumping backward to a previous keyframe.
-        let mut flags = gst::SeekFlags::FLUSH;
-        if accurate {
-            flags |= gst::SeekFlags::ACCURATE;
-        } else {
-            flags |= gst::SeekFlags::KEY_UNIT;
-            if current_speed >= 0.0 {
-                flags |= gst::SeekFlags::SNAP_AFTER;
-            } else {
-                flags |= gst::SeekFlags::SNAP_BEFORE;
-            }
-        }
-
-        match &position {
-            Position::Time(_) => self.source.seek(
-                current_speed,
-                flags,
-                gst::SeekType::Set,
-                gst::GenericFormattedValue::from(position),
-                gst::SeekType::None,
-                gst::ClockTime::NONE,
-            )?,
-            Position::Frame(_) => self.source.seek(
-                current_speed,
-                flags,
-                gst::SeekType::Set,
-                gst::GenericFormattedValue::from(position),
-                gst::SeekType::None,
-                gst::format::Default::NONE,
-            )?,
-        };
-
         *self.subtitle_text.lock() = None;
         self.upload_text.store(true, Ordering::SeqCst);
-
-        // Clear any buffered frames so old frames do not display after a seek,
-        // which can visually appear as a larger-than-intended jump.
         self.frame_buffer.lock().clear();
         self.upload_frame.store(false, Ordering::SeqCst);
 
-        Ok(())
+        pipeline_seek(&self.source, current_speed, position, accurate)
     }
 
     pub(crate) fn restart_stream(&mut self) -> Result<(), Error> {
@@ -293,6 +256,44 @@ impl Internal {
         // animation-frame loop until the next input event.
         self.is_paused.load(Ordering::SeqCst)
     }
+}
+
+fn pipeline_seek(
+    pipeline: &gst::Pipeline,
+    speed: f64,
+    position: Position,
+    accurate: bool,
+) -> Result<(), Error> {
+    let mut flags = gst::SeekFlags::FLUSH;
+    if accurate {
+        flags |= gst::SeekFlags::ACCURATE;
+    } else {
+        flags |= gst::SeekFlags::KEY_UNIT;
+        if speed >= 0.0 {
+            flags |= gst::SeekFlags::SNAP_AFTER;
+        } else {
+            flags |= gst::SeekFlags::SNAP_BEFORE;
+        }
+    }
+    match position {
+        Position::Time(_) => pipeline.seek(
+            speed,
+            flags,
+            gst::SeekType::Set,
+            gst::GenericFormattedValue::from(position),
+            gst::SeekType::None,
+            gst::ClockTime::NONE,
+        )?,
+        Position::Frame(_) => pipeline.seek(
+            speed,
+            flags,
+            gst::SeekType::Set,
+            gst::GenericFormattedValue::from(position),
+            gst::SeekType::None,
+            gst::format::Default::NONE,
+        )?,
+    }
+    Ok(())
 }
 
 /// Change rate without `ACCURATE`: flush-accurate seeks stall the pipeline and
@@ -838,7 +839,17 @@ impl Video {
 
     /// Jumps to a specific position in the media.
     pub fn seek(&self, position: impl Into<Position>, accurate: bool) -> Result<(), Error> {
-        self.write().seek(position, accurate)
+        let position = position.into();
+        let inner = self.read();
+        inner.is_eos.store(false, Ordering::SeqCst);
+        *inner.subtitle_text.lock() = None;
+        inner.upload_text.store(true, Ordering::SeqCst);
+        inner.frame_buffer.lock().clear();
+        inner.upload_frame.store(false, Ordering::SeqCst);
+        let pipeline = inner.source.clone();
+        let speed = f64::from_bits(inner.speed.load(Ordering::SeqCst));
+        drop(inner);
+        pipeline_seek(&pipeline, speed, position, accurate)
     }
 
     /// Set the playback speed of the media.

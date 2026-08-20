@@ -24,6 +24,10 @@ pub fn progress_track() -> Hsla {
     rgba(0xFFFFFF4D).into()
 }
 
+pub fn seek_tooltip() -> Hsla {
+    rgba(0x000000CC).into()
+}
+
 pub fn icon_hover() -> Hsla {
     rgba(0xFFFFFF22).into()
 }
