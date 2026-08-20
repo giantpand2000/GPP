@@ -2373,8 +2373,6 @@ dependencies = [
 [[package]]
 name = "gpui-video-player"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d112995702fe40f6976dde98e8d4d0abfbaeb799e4630e8c2a0ebebeff27654"
 dependencies = [
  "core-foundation 0.10.0",
  "core-video",

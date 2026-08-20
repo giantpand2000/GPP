@@ -1,0 +1,28 @@
+[package]
+name = "gpui-video-player"
+version = "0.1.2"
+edition = "2024"
+exclude = ["assets"]
+authors = ["nemurubaka <cijiugechu@gmail.com>"]
+description = "A video player library for gpui applications, built on top of GStreamer."
+license = "MIT"
+readme = "README.md"
+
+[dependencies]
+gpui = "0.2"
+gstreamer = "0.24"
+gstreamer-app = "0.24"
+gstreamer-base = "0.24"
+gstreamer-video = "0.24"
+glib = "0.21"
+log = "0.4"
+thiserror = "2"
+url = "2"
+parking_lot = "0.12"
+image = { version = "0.25", default-features = false, features = ["png", "gif", "webp"] }
+smallvec = "1"
+yuv = "0.8"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-video = "0.4"
+core-foundation = "0.10"
