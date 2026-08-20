@@ -1,9 +1,12 @@
 mod actions;
+mod assets;
+mod icon;
 mod player;
 mod theme;
 mod util;
 
 use actions::*;
+use assets::Assets;
 use gpui::{
     App, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds,
     WindowOptions, prelude::*, px, size,
@@ -25,37 +28,39 @@ fn main() {
             }
         });
 
-    Application::new().run(move |cx: &mut App| {
-        cx.activate(true);
-        cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.bind_keys(keybindings());
-        cx.set_menus(app_menus());
-        cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
+    Application::new()
+        .with_assets(Assets::new())
+        .run(move |cx: &mut App| {
+            cx.activate(true);
+            cx.on_action(|_: &Quit, cx| cx.quit());
+            cx.bind_keys(keybindings());
+            cx.set_menus(app_menus());
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
 
-        let bounds = Bounds::centered(None, size(px(1120.), px(680.)), cx);
-        let initial = initial.clone();
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(640.), px(360.))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("GPP".into()),
-                    appears_transparent: false,
+            let bounds = Bounds::centered(None, size(px(1120.), px(680.)), cx);
+            let initial = initial.clone();
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(640.), px(360.))),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("GPP".into()),
+                        appears_transparent: false,
+                        ..Default::default()
+                    }),
+                    app_id: Some("gpp".into()),
+                    focus: true,
                     ..Default::default()
-                }),
-                app_id: Some("gpp".into()),
-                focus: true,
-                ..Default::default()
-            },
-            |window, cx| cx.new(|cx| Player::new(initial, window, cx)),
-        )
-        .unwrap();
-    });
+                },
+                |window, cx| cx.new(|cx| Player::new(initial, window, cx)),
+            )
+            .unwrap();
+        });
 }
 
 fn keybindings() -> Vec<KeyBinding> {

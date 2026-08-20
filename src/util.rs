@@ -97,6 +97,10 @@ pub fn collect_media(paths: impl IntoIterator<Item = PathBuf>) -> Vec<MediaSourc
 }
 
 pub fn format_duration(duration: Duration) -> String {
+    format_player_time(duration)
+}
+
+pub fn format_player_time(duration: Duration) -> String {
     let total = duration.as_secs();
     let hours = total / 3600;
     let minutes = (total % 3600) / 60;
@@ -104,7 +108,7 @@ pub fn format_duration(duration: Duration) -> String {
     if hours > 0 {
         format!("{hours}:{minutes:02}:{seconds:02}")
     } else {
-        format!("{minutes:02}:{seconds:02}")
+        format!("{minutes}:{seconds:02}")
     }
 }
 
@@ -151,8 +155,8 @@ mod tests {
 
     #[test]
     fn formats_minutes_and_hours() {
-        assert_eq!(format_duration(Duration::from_secs(5)), "00:05");
-        assert_eq!(format_duration(Duration::from_secs(75)), "01:15");
+        assert_eq!(format_duration(Duration::from_secs(5)), "0:05");
+        assert_eq!(format_duration(Duration::from_secs(75)), "1:15");
         assert_eq!(format_duration(Duration::from_secs(3661)), "1:01:01");
     }
 

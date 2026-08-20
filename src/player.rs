@@ -1,4 +1,5 @@
 use crate::actions::*;
+use crate::icon::{self, Icon};
 use crate::theme;
 use crate::util::{
     self, MediaSource, collect_media, format_duration, format_speed, is_video_path, next_speed,
@@ -6,7 +7,7 @@ use crate::util::{
 use gpui::{
     App, Bounds, ClickEvent, Context, CursorStyle, ExternalPaths, FocusHandle, Focusable,
     FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    ScrollWheelEvent, SharedString, Timer, Window, canvas, div, prelude::*, px, white,
+    ScrollWheelEvent, SharedString, Timer, Window, canvas, div, prelude::*, px,
 };
 use gpui_video_player::{Video, VideoOptions, video as video_el};
 use std::time::{Duration, Instant};
@@ -560,12 +561,12 @@ impl Render for Player {
             })
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.handle_drop(paths, cx)))
             .drag_over::<ExternalPaths>(|style, _, _, _| {
-                style.border_2().border_color(theme::accent())
+                style.border_2().border_color(theme::progress())
             })
             .child(self.render_stage(entity.clone(), cx))
             .when(show_chrome, |this| {
                 this.child(self.render_top_bar(cx))
-                    .child(self.render_controls(entity, cx))
+                    .child(self.render_controls(entity, window, cx))
             })
     }
 }
@@ -646,9 +647,10 @@ impl Player {
             .top_0()
             .left_0()
             .right_0()
-            .px_6()
-            .pt_4()
+            .px_4()
+            .pt_3()
             .pb_8()
+            .bg(theme::top_gradient())
             .block_mouse_except_scroll()
             .child(
                 div()
@@ -657,23 +659,13 @@ impl Player {
                     .justify_between()
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(div().text_sm().text_color(theme::muted()).child("GPP"))
-                            .child(div().text_color(theme::text()).child(self.current_title())),
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme::white())
+                            .child(self.current_title()),
                     )
                     .when_some(playlist, |this, label| {
-                        this.child(
-                            div()
-                                .px_2()
-                                .py_1()
-                                .rounded_md()
-                                .bg(theme::surface())
-                                .text_xs()
-                                .text_color(theme::muted())
-                                .child(label),
-                        )
+                        this.child(div().text_xs().text_color(theme::muted()).child(label))
                     }),
             )
     }
@@ -681,6 +673,7 @@ impl Player {
     fn render_controls(
         &self,
         entity: gpui::Entity<Self>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let paused = self
@@ -696,17 +689,20 @@ impl Player {
                 .map(|video| video.duration())
                 .unwrap_or(Duration::ZERO),
         );
-        let play_label = if paused { "Play" } else { "Pause" };
         let volume_ratio = if self.muted { 0.0 } else { self.volume as f32 };
-        let volume_label = if self.muted || self.volume == 0.0 {
-            "Muted"
+        let volume_icon = if self.muted || self.volume == 0.0 {
+            Icon::VolumeOff
+        } else if self.volume < 0.5 {
+            Icon::VolumeDown
         } else {
-            "Vol"
+            Icon::VolumeUp
         };
-        let loop_label = if self.looping { "Loop on" } else { "Loop" };
+        let play_icon = if paused { Icon::Play } else { Icon::Pause };
         let speed_label = format_speed(self.speed);
-        let can_prev = self.playlist.len() > 1;
-        let can_next = self.playlist.len() > 1;
+        let can_playlist = self.playlist.len() > 1;
+        let has_video = self.video.is_some();
+        let fullscreen = window.is_fullscreen();
+        let volume_open = self.dragging == Some(DragTarget::Volume);
 
         div()
             .id("controls")
@@ -714,111 +710,106 @@ impl Player {
             .bottom_0()
             .left_0()
             .right_0()
-            .px_5()
-            .pb_4()
-            .pt_10()
+            .pt_8()
+            .pb_1()
+            .bg(theme::bottom_gradient())
             .block_mouse_except_scroll()
+            .flex()
+            .flex_col()
+            .child(self.render_seek_bar(progress, entity.clone(), cx))
             .child(
                 div()
                     .id("control-bar")
-                    .rounded_xl()
-                    .bg(theme::bar())
-                    .block_mouse_except_scroll()
-                    .px_4()
-                    .py_3()
+                    .px_2()
+                    .h(px(48.))
                     .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(self.render_seek_bar(progress, entity.clone(), cx))
+                    .items_center()
+                    .block_mouse_except_scroll()
+                    .child(icon::icon_button(
+                        "play",
+                        play_icon,
+                        false,
+                        false,
+                        cx.listener(|this, _, _, cx| this.toggle_play(cx)),
+                    ))
+                    .child(icon::skip_button(
+                        "back",
+                        Icon::Replay,
+                        "5",
+                        !has_video,
+                        cx.listener(|this, _, _, cx| this.seek_by(SEEK_STEP, true, cx)),
+                    ))
+                    .child(icon::skip_button(
+                        "forward",
+                        Icon::Forward,
+                        "5",
+                        !has_video,
+                        cx.listener(|this, _, _, cx| this.seek_by(SEEK_STEP, false, cx)),
+                    ))
+                    .when(can_playlist, |this| {
+                        this.child(icon::icon_button(
+                            "next",
+                            Icon::SkipNext,
+                            false,
+                            false,
+                            cx.listener(|this, _, _, cx| this.next_track(cx)),
+                        ))
+                    })
+                    .child(self.render_volume_cluster(
+                        volume_icon,
+                        volume_ratio,
+                        volume_open,
+                        entity,
+                        cx,
+                    ))
                     .child(
                         div()
+                            .ml_1()
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .child(chip(
-                                "prev",
-                                "Prev",
-                                false,
-                                !can_prev,
-                                cx.listener(|this, _, _, cx| this.prev_track(cx)),
-                            ))
-                            .child(chip(
-                                "back",
-                                "-5s",
-                                false,
-                                self.video.is_none(),
-                                cx.listener(|this, _, _, cx| this.seek_by(SEEK_STEP, true, cx)),
-                            ))
-                            .child(chip(
-                                "play",
-                                play_label,
-                                true,
-                                false,
-                                cx.listener(|this, _, _, cx| this.toggle_play(cx)),
-                            ))
-                            .child(chip(
-                                "forward",
-                                "+5s",
-                                false,
-                                self.video.is_none(),
-                                cx.listener(|this, _, _, cx| this.seek_by(SEEK_STEP, false, cx)),
-                            ))
-                            .child(chip(
-                                "next",
-                                "Next",
-                                false,
-                                !can_next,
-                                cx.listener(|this, _, _, cx| this.next_track(cx)),
-                            ))
-                            .child(
-                                div()
-                                    .ml_2()
-                                    .text_xs()
-                                    .text_color(theme::muted())
-                                    .child(format!("{position}  /  {duration}")),
-                            )
-                            .child(div().flex_1())
-                            .child(chip(
-                                "speed",
-                                speed_label,
-                                false,
-                                self.video.is_none(),
-                                cx.listener(|this, _, _, cx| this.cycle_speed(cx)),
-                            ))
-                            .child(chip(
-                                "loop",
-                                loop_label,
-                                self.looping,
-                                false,
-                                cx.listener(|this, _, _, cx| this.toggle_loop(cx)),
-                            ))
-                            .child(chip(
-                                "mute",
-                                volume_label,
-                                self.muted,
-                                false,
-                                cx.listener(|this, _, _, cx| this.toggle_mute(cx)),
-                            ))
-                            .child(self.render_volume_bar(volume_ratio, entity, cx))
-                            .child(chip(
-                                "open",
-                                "Open",
-                                false,
-                                false,
-                                cx.listener(|this, _, window, cx| this.open_dialog(window, cx)),
-                            ))
-                            .child(chip(
-                                "full",
-                                "Full",
-                                false,
-                                false,
-                                cx.listener(|this, _, window, cx| {
-                                    this.bump_interaction();
-                                    window.toggle_fullscreen();
-                                    cx.notify();
-                                }),
-                            )),
-                    ),
+                            .text_xs()
+                            .text_color(theme::white())
+                            .child(position)
+                            .child(div().px_1().text_color(theme::muted()).child(" / "))
+                            .child(div().text_color(theme::muted()).child(duration)),
+                    )
+                    .child(div().flex_1())
+                    .child(icon::text_button(
+                        "speed",
+                        speed_label,
+                        false,
+                        !has_video,
+                        cx.listener(|this, _, _, cx| this.cycle_speed(cx)),
+                    ))
+                    .child(icon::icon_button(
+                        "loop",
+                        Icon::Repeat,
+                        self.looping,
+                        false,
+                        cx.listener(|this, _, _, cx| this.toggle_loop(cx)),
+                    ))
+                    .child(icon::icon_button(
+                        "open",
+                        Icon::Folder,
+                        false,
+                        false,
+                        cx.listener(|this, _, window, cx| this.open_dialog(window, cx)),
+                    ))
+                    .child(icon::icon_button(
+                        "full",
+                        if fullscreen {
+                            Icon::FullscreenExit
+                        } else {
+                            Icon::Fullscreen
+                        },
+                        false,
+                        false,
+                        cx.listener(|this, _, window, cx| {
+                            this.bump_interaction();
+                            window.toggle_fullscreen();
+                            cx.notify();
+                        }),
+                    )),
             )
     }
 
@@ -828,11 +819,16 @@ impl Player {
         entity: gpui::Entity<Self>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let scrubbing = self.dragging == Some(DragTarget::Seek);
+        let knob_size = px(13.);
+
         div()
             .id("seek-bar")
+            .group("seek")
             .relative()
             .w_full()
-            .h(px(18.))
+            .h(px(16.))
+            .px_3()
             .flex()
             .items_center()
             .cursor(CursorStyle::PointingHand)
@@ -854,17 +850,74 @@ impl Player {
             )
             .child(
                 div()
+                    .relative()
                     .w_full()
-                    .h(px(4.))
+                    .h(px(3.))
                     .rounded_full()
-                    .bg(theme::track())
+                    .bg(theme::progress_track())
+                    .group_hover("seek", |style| style.h(px(5.)))
+                    .when(scrubbing, |this| this.h(px(5.)))
                     .child(
                         div()
                             .h_full()
                             .w(gpui::relative(progress))
                             .rounded_full()
-                            .bg(theme::accent()),
+                            .bg(theme::progress()),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(-5.))
+                            .flex()
+                            .w_full()
+                            .child(div().w(gpui::relative(progress)))
+                            .child(
+                                div()
+                                    .ml(px(-6.5))
+                                    .size(knob_size)
+                                    .rounded_full()
+                                    .bg(theme::progress())
+                                    .when(!scrubbing, |this| {
+                                        this.opacity(0.)
+                                            .group_hover("seek", |style| style.opacity(1.))
+                                    }),
+                            ),
                     ),
+            )
+    }
+
+    fn render_volume_cluster(
+        &self,
+        volume_icon: Icon,
+        ratio: f32,
+        expanded: bool,
+        entity: gpui::Entity<Self>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id("volume-cluster")
+            .group("volume")
+            .h(px(40.))
+            .flex()
+            .items_center()
+            .flex_none()
+            .child(icon::icon_button(
+                "mute",
+                volume_icon,
+                false,
+                false,
+                cx.listener(|this, _, _, cx| this.toggle_mute(cx)),
+            ))
+            .child(
+                div()
+                    .id("volume-slider-wrap")
+                    .overflow_hidden()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .w(if expanded { px(72.) } else { px(0.) })
+                    .group_hover("volume", |style| style.w(px(72.)))
+                    .child(self.render_volume_bar(ratio, entity, cx)),
             )
     }
 
@@ -877,8 +930,9 @@ impl Player {
         div()
             .id("volume-bar")
             .relative()
-            .w(px(84.))
-            .h(px(18.))
+            .w(px(64.))
+            .h(px(40.))
+            .ml_1()
             .flex()
             .items_center()
             .cursor(CursorStyle::PointingHand)
@@ -901,9 +955,9 @@ impl Player {
             .child(
                 div()
                     .w_full()
-                    .h(px(4.))
+                    .h(px(3.))
                     .rounded_full()
-                    .bg(theme::track())
+                    .bg(theme::progress_track())
                     .child(
                         div()
                             .h_full()
@@ -913,47 +967,6 @@ impl Player {
                     ),
             )
     }
-}
-
-fn chip(
-    id: &'static str,
-    label: impl Into<SharedString>,
-    emphasized: bool,
-    disabled: bool,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .px_3()
-        .py_1()
-        .rounded_md()
-        .text_xs()
-        .bg(if emphasized {
-            theme::accent()
-        } else {
-            theme::surface()
-        })
-        .text_color(if emphasized {
-            white()
-        } else if disabled {
-            theme::muted()
-        } else {
-            theme::text()
-        })
-        .when(!disabled, |this| {
-            this.cursor(CursorStyle::PointingHand)
-                .hover(|style| {
-                    style.bg(if emphasized {
-                        theme::accent()
-                    } else {
-                        theme::surface_hover()
-                    })
-                })
-                .active(|style| style.opacity(0.85))
-                .on_click(on_click)
-        })
-        .when(disabled, |this| this.opacity(0.45))
-        .child(label.into())
 }
 
 fn empty_state(title: String, cx: &mut Context<Player>) -> impl IntoElement {
@@ -967,22 +980,23 @@ fn empty_state(title: String, cx: &mut Context<Player>) -> impl IntoElement {
         .flex_col()
         .items_center()
         .justify_center()
-        .gap_4()
+        .gap_3()
         .child(
             div()
-                .w(px(72.))
-                .h(px(48.))
-                .rounded_md()
-                .border_2()
-                .border_color(theme::accent_dim())
-                .bg(theme::surface())
+                .id("empty-play")
+                .size(px(68.))
+                .rounded_full()
+                .bg(theme::progress())
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(theme::accent())
-                .child("GPP"),
+                .pl(px(4.))
+                .cursor(CursorStyle::PointingHand)
+                .hover(|style| style.opacity(0.9))
+                .on_click(cx.listener(|this, _, window, cx| this.open_dialog(window, cx)))
+                .child(icon::icon(Icon::Play, 36.)),
         )
-        .child(div().text_color(theme::text()).child(if title == "GPP" {
+        .child(div().text_color(theme::white()).child(if title == "GPP" {
             SharedString::from("Drop a video here")
         } else {
             title.into()
@@ -991,21 +1005,7 @@ fn empty_state(title: String, cx: &mut Context<Player>) -> impl IntoElement {
             div()
                 .text_sm()
                 .text_color(theme::muted())
-                .child("Open a file, or drag a movie onto the window"),
-        )
-        .child(chip(
-            "empty-open",
-            "Open video",
-            true,
-            false,
-            cx.listener(|this, _, window, cx| this.open_dialog(window, cx)),
-        ))
-        .child(
-            div()
-                .mt_4()
-                .text_xs()
-                .text_color(theme::muted())
-                .child("Space play   ← → seek   F fullscreen   O open"),
+                .child("or click to open a file"),
         )
 }
 

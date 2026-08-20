@@ -1,49 +1,53 @@
-use gpui::{Hsla, rgb, rgba};
+use gpui::{Hsla, linear_color_stop, linear_gradient, rgb, rgba};
 
 pub fn bg() -> Hsla {
-    rgb(0x0B0B0E).into()
-}
-
-pub fn surface() -> Hsla {
-    rgb(0x14141A).into()
-}
-
-pub fn surface_hover() -> Hsla {
-    rgb(0x22222C).into()
+    rgb(0x0F0F0F).into()
 }
 
 pub fn text() -> Hsla {
-    rgb(0xF3F3F7).into()
+    rgb(0xFFFFFF).into()
 }
 
 pub fn muted() -> Hsla {
-    rgb(0x8E8E99).into()
-}
-
-pub fn accent() -> Hsla {
-    rgb(0x7C9CFF).into()
-}
-
-pub fn accent_dim() -> Hsla {
-    rgb(0x3E4E82).into()
-}
-
-pub fn danger() -> Hsla {
-    rgb(0xFF6B6B).into()
-}
-
-pub fn bar() -> Hsla {
-    rgba(0x101018E8).into()
-}
-
-pub fn track() -> Hsla {
-    rgba(0xFFFFFF22).into()
+    rgb(0xAAAAAA).into()
 }
 
 pub fn white() -> Hsla {
     rgb(0xFFFFFF).into()
 }
 
+pub fn progress() -> Hsla {
+    rgb(0xFF0000).into()
+}
+
+pub fn progress_track() -> Hsla {
+    rgba(0xFFFFFF4D).into()
+}
+
+pub fn icon_hover() -> Hsla {
+    rgba(0xFFFFFF22).into()
+}
+
+pub fn danger() -> Hsla {
+    rgb(0xFF4E45).into()
+}
+
 pub fn overlay() -> Hsla {
-    rgba(0x00000066).into()
+    rgba(0x00000080).into()
+}
+
+pub fn bottom_gradient() -> gpui::Background {
+    linear_gradient(
+        180.,
+        linear_color_stop(rgba(0x00000000), 0.),
+        linear_color_stop(rgba(0x000000CC), 1.),
+    )
+}
+
+pub fn top_gradient() -> gpui::Background {
+    linear_gradient(
+        0.,
+        linear_color_stop(rgba(0x00000000), 0.),
+        linear_color_stop(rgba(0x000000B3), 1.),
+    )
 }

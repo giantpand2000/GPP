@@ -6,8 +6,9 @@ GPU-accelerated video player written in Rust, using [GPUI](https://www.gpui.rs/)
 
 - Local files and HTTP(S) streams
 - Drag a file or folder onto the window (folders are scanned for videos)
-- Play / pause, seek, volume, mute, loop, playback speed
-- Playlist next / previous
+- YouTube-style overlay: SVG icons, red progress bar, hover-to-scrub knob, expanding volume slider
+- Play / pause, skip 5s, volume, mute, loop, playback speed
+- Playlist next
 - Fullscreen
 - Auto-hiding controls while a video is playing
 
