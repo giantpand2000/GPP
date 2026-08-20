@@ -1,8 +1,11 @@
 use crate::actions::*;
 use crate::icon::{self, Icon};
+use crate::settings::{self, Settings};
+use crate::subtitles::{self, SubtitleSession};
 use crate::theme;
 use crate::util::{
-    self, MediaSource, collect_media, format_duration, format_speed, is_video_path, next_speed,
+    self, MediaSource, collect_media, format_duration, format_speed, is_subtitle_path,
+    is_video_path, next_speed,
 };
 use gpui::{
     App, Bounds, ClickEvent, Context, CursorStyle, ExternalPaths, FocusHandle, Focusable,
@@ -10,7 +13,9 @@ use gpui::{
     ScrollWheelEvent, SharedString, Timer, Window, canvas, div, prelude::*, px,
 };
 use gpui_video_player::{Video, VideoOptions, video as video_el};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use url::Url;
 
 const SEEK_STEP: Duration = Duration::from_secs(5);
 const SEEK_STEP_LARGE: Duration = Duration::from_secs(15);
@@ -49,12 +54,17 @@ pub struct Player {
     scrub: Option<f32>,
     load_generation: u64,
     dialog_open: bool,
+    subtitles: Option<SubtitleSession>,
+    subtitle_toast: Option<(SharedString, Instant)>,
+    settings: Settings,
+    settings_open: bool,
 }
 
 impl Player {
     pub fn new(initial: Option<MediaSource>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
+        let settings = Settings::load();
 
         let mut player = Self {
             focus_handle,
@@ -63,10 +73,10 @@ impl Player {
             video: None,
             status: Status::Empty,
             error: None,
-            looping: false,
-            muted: false,
-            volume: 1.0,
-            speed: 1.0,
+            looping: settings.loop_playback,
+            muted: settings.muted,
+            volume: settings.volume,
+            speed: settings.speed,
             controls_visible: true,
             last_interaction: Instant::now(),
             stage_bounds: Bounds::default(),
@@ -76,6 +86,10 @@ impl Player {
             scrub: None,
             load_generation: 0,
             dialog_open: false,
+            subtitles: None,
+            subtitle_toast: None,
+            settings,
+            settings_open: false,
         };
 
         if let Some(source) = initial {
@@ -137,6 +151,7 @@ impl Player {
             self.error = Some("No playable files found".into());
             self.status = Status::Empty;
             self.video = None;
+            self.subtitles = None;
             cx.notify();
             return;
         }
@@ -163,6 +178,8 @@ impl Player {
         self.status = Status::Loading;
         self.error = None;
         self.video = None;
+        self.subtitles = None;
+        self.subtitle_toast = None;
         self.scrub = None;
         self.load_generation += 1;
         let generation = self.load_generation;
@@ -170,10 +187,15 @@ impl Player {
         let speed = self.speed;
         let volume = self.volume;
         let muted = self.muted;
+        let sidecar = match &source {
+            MediaSource::File(path) => subtitles::sidecar_uri(path),
+            MediaSource::Url(_) => None,
+        };
 
         let task = cx.background_spawn(async move {
-            Video::new_with_options(
+            subtitles::open(
                 &uri,
+                sidecar.as_ref(),
                 VideoOptions {
                     frame_buffer_capacity: Some(4),
                     looping: Some(looping),
@@ -194,19 +216,27 @@ impl Player {
                     return;
                 }
                 match result {
-                    Ok(video) => {
-                        video.set_volume(volume);
-                        video.set_muted(muted);
+                    Ok(mut opened) => {
+                        opened.video.set_volume(volume);
+                        opened.video.set_muted(muted);
                         if (speed - 1.0).abs() > f64::EPSILON {
-                            let _ = video.set_speed(speed);
+                            let _ = opened.video.set_speed(speed);
                         }
-                        this.sync_display_size(&video);
-                        this.video = Some(video);
+                        this.sync_display_size(&opened.video);
+                        if !this.settings.autoplay {
+                            opened.video.set_paused(true);
+                        }
+                        if !this.settings.subtitle_enabled {
+                            opened.subtitles.set_current(None);
+                        }
+                        this.video = Some(opened.video);
+                        this.subtitles = Some(opened.subtitles);
                         this.status = Status::Ready;
                         this.error = None;
                     }
                     Err(err) => {
                         this.video = None;
+                        this.subtitles = None;
                         this.status = Status::Empty;
                         this.error = Some(format!("Failed to open video: {err}"));
                     }
@@ -285,6 +315,8 @@ impl Player {
             video.set_volume(self.volume);
             video.set_muted(self.muted);
         }
+        self.settings.volume = self.volume;
+        self.settings.save();
         cx.notify();
     }
 
@@ -294,6 +326,8 @@ impl Player {
         if let Some(video) = &self.video {
             video.set_muted(self.muted);
         }
+        self.settings.muted = self.muted;
+        self.settings.save();
         cx.notify();
     }
 
@@ -303,6 +337,8 @@ impl Player {
         if let Some(video) = &self.video {
             video.set_looping(self.looping);
         }
+        self.settings.loop_playback = self.looping;
+        self.settings.save();
         cx.notify();
     }
 
@@ -312,7 +348,34 @@ impl Player {
         if let Some(video) = &self.video {
             let _ = video.set_speed(self.speed);
         }
+        self.settings.speed = self.speed;
+        self.settings.save();
         cx.notify();
+    }
+
+    fn set_speed(&mut self, speed: f64, cx: &mut Context<Self>) {
+        self.speed = speed;
+        if let Some(video) = &self.video {
+            let _ = video.set_speed(self.speed);
+        }
+        self.settings.speed = self.speed;
+        self.settings.save();
+        cx.notify();
+    }
+
+    fn toggle_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings_open = !self.settings_open;
+        if self.settings_open {
+            self.controls_visible = true;
+        }
+        cx.notify();
+    }
+
+    fn close_settings(&mut self, cx: &mut Context<Self>) {
+        if self.settings_open {
+            self.settings_open = false;
+            cx.notify();
+        }
     }
 
     fn restart(&mut self, cx: &mut Context<Self>) {
@@ -351,8 +414,48 @@ impl Player {
 
     fn handle_drop(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
         self.bump_interaction();
+        let subtitle = paths
+            .paths()
+            .iter()
+            .find(|path| is_subtitle_path(path))
+            .cloned();
         let sources = collect_media(paths.paths().iter().cloned());
+        if sources.is_empty() {
+            if let Some(path) = subtitle {
+                self.load_external_subtitle(path, cx);
+            }
+            return;
+        }
         self.load_sources(sources, 0, cx);
+    }
+
+    fn load_external_subtitle(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(session) = self.subtitles.as_mut() else {
+            self.error = Some("Open a video before dropping a subtitle file".into());
+            cx.notify();
+            return;
+        };
+        match Url::from_file_path(path.canonicalize().unwrap_or(path)) {
+            Ok(uri) => {
+                session.load_external(&uri);
+                let label = session.current_label().unwrap_or("Subtitles").to_string();
+                self.subtitle_toast = Some((label.into(), Instant::now()));
+            }
+            Err(()) => {
+                self.error = Some("Invalid subtitle path".into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn cycle_subtitles(&mut self, cx: &mut Context<Self>) {
+        self.bump_interaction();
+        let Some(session) = self.subtitles.as_mut() else {
+            return;
+        };
+        let label = session.cycle();
+        self.subtitle_toast = Some((label.into(), Instant::now()));
+        cx.notify();
     }
 
     fn ratio_at(bounds: Bounds<Pixels>, x: Pixels) -> f32 {
@@ -424,7 +527,7 @@ impl Player {
         let Some(video) = self.video.clone() else {
             return;
         };
-        if !video.eos() || self.looping {
+        if !video.eos() || self.looping || !self.settings.autoplay {
             return;
         }
         if self.playlist.len() > 1 && self.index + 1 < self.playlist.len() {
@@ -478,7 +581,11 @@ impl Render for Player {
 
         if playing {
             window.request_animation_frame();
-            if self.dragging.is_none() && self.last_interaction.elapsed() > HIDE_CONTROLS_AFTER {
+            if self.settings.auto_hide_controls
+                && !self.settings_open
+                && self.dragging.is_none()
+                && self.last_interaction.elapsed() > HIDE_CONTROLS_AFTER
+            {
                 self.controls_visible = false;
             }
         } else {
@@ -486,6 +593,19 @@ impl Render for Player {
         }
 
         window.set_window_title(&format!("{} — GPP", self.current_title()));
+
+        if self
+            .subtitle_toast
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(2))
+        {
+            self.subtitle_toast = None;
+        }
+        if let Some(session) = self.subtitles.as_mut()
+            && session.tracks().is_empty()
+        {
+            session.refresh_tracks();
+        }
 
         let show_chrome = self.controls_visible || self.status != Status::Ready || !playing;
         let entity = cx.entity();
@@ -524,13 +644,19 @@ impl Render for Player {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ExitFullscreen, window, cx| {
+                if this.settings_open {
+                    this.close_settings(cx);
+                    return;
+                }
                 if window.is_fullscreen() {
                     this.bump_interaction();
                     window.toggle_fullscreen();
                     cx.notify();
                 }
             }))
+            .on_action(cx.listener(|this, _: &ToggleSettings, _, cx| this.toggle_settings(cx)))
             .on_action(cx.listener(|this, _: &CycleSpeed, _, cx| this.cycle_speed(cx)))
+            .on_action(cx.listener(|this, _: &CycleSubtitles, _, cx| this.cycle_subtitles(cx)))
             .on_action(cx.listener(|this, _: &NextTrack, _, cx| this.next_track(cx)))
             .on_action(cx.listener(|this, _: &PrevTrack, _, cx| this.prev_track(cx)))
             .on_action(cx.listener(|this, _: &Restart, _, cx| this.restart(cx)))
@@ -564,9 +690,13 @@ impl Render for Player {
                 style.border_2().border_color(theme::progress())
             })
             .child(self.render_stage(entity.clone(), cx))
+            .child(self.render_subtitle_overlay(show_chrome))
             .when(show_chrome, |this| {
                 this.child(self.render_top_bar(cx))
                     .child(self.render_controls(entity, window, cx))
+            })
+            .when(self.settings_open, |this| {
+                this.child(self.render_settings_overlay(cx))
             })
     }
 }
@@ -632,6 +762,278 @@ impl Player {
             .when_some(error, |this, error| {
                 this.child(status_overlay("Couldn't play this file", Some(error)))
             })
+    }
+
+    fn render_subtitle_overlay(&self, chrome_visible: bool) -> impl IntoElement {
+        let cue = self
+            .subtitles
+            .as_ref()
+            .and_then(|session| session.cue_at(self.displayed_position()));
+        let toast = self.subtitle_toast.as_ref().map(|(label, _)| label.clone());
+
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom(if chrome_visible { px(76.) } else { px(28.) })
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_2()
+            .when_some(toast, |this, label| {
+                this.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .rounded_md()
+                        .bg(theme::overlay())
+                        .text_xs()
+                        .text_color(theme::muted())
+                        .child(label),
+                )
+            })
+            .when_some(cue, |this, text| {
+                this.child(
+                    div()
+                        .max_w(px(860.))
+                        .px_3()
+                        .py_1()
+                        .rounded_sm()
+                        .when(self.settings.subtitle_background, |this| {
+                            this.bg(theme::overlay())
+                        })
+                        .text_color(theme::white())
+                        .text_size(px(self.settings.subtitle_size))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .gap_1()
+                                .children(text.lines().map(|line| line.to_string())),
+                        ),
+                )
+            })
+    }
+
+    fn render_settings_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let autoplay = self.settings.autoplay;
+        let looping = self.settings.loop_playback;
+        let auto_hide = self.settings.auto_hide_controls;
+        let speed = self.settings.speed;
+        let volume = self.settings.volume;
+        let subs_on = self.settings.subtitle_enabled;
+        let subs_bg = self.settings.subtitle_background;
+        let subs_size = self.settings.subtitle_size;
+
+        div()
+            .id("settings-overlay")
+            .absolute()
+            .size_full()
+            .top_0()
+            .left_0()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme::settings_veil())
+            .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
+            .child(
+                div()
+                    .id("settings-panel")
+                    .w(px(420.))
+                    .max_h(px(560.))
+                    .rounded_xl()
+                    .bg(theme::settings_panel())
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .px_5()
+                            .h(px(56.))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme::white())
+                                    .child("Settings"),
+                            )
+                            .child(icon::icon_button(
+                                "settings-close",
+                                Icon::Close,
+                                false,
+                                false,
+                                cx.listener(|this, _, _, cx| this.close_settings(cx)),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("settings-scroll")
+                            .flex_1()
+                            .px_5()
+                            .pb_5()
+                            .flex()
+                            .flex_col()
+                            .overflow_y_scroll()
+                            .child(settings::section_label("PLAYBACK"))
+                            .child(settings::setting_row(
+                                "Autoplay",
+                                settings::toggle(
+                                    "set-autoplay",
+                                    autoplay,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.settings.autoplay = !this.settings.autoplay;
+                                        this.settings.save();
+                                        cx.notify();
+                                    }),
+                                ),
+                            ))
+                            .child(settings::setting_row(
+                                "Loop by default",
+                                settings::toggle(
+                                    "set-loop",
+                                    looping,
+                                    cx.listener(|this, _, _, cx| this.toggle_loop(cx)),
+                                ),
+                            ))
+                            .child(settings::setting_row(
+                                "Auto-hide controls",
+                                settings::toggle(
+                                    "set-autohide",
+                                    auto_hide,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.settings.auto_hide_controls =
+                                            !this.settings.auto_hide_controls;
+                                        this.settings.save();
+                                        cx.notify();
+                                    }),
+                                ),
+                            ))
+                            .child(
+                                div()
+                                    .pt_1()
+                                    .pb_1()
+                                    .text_xs()
+                                    .text_color(theme::muted())
+                                    .child("Default speed"),
+                            )
+                            .child(div().flex().items_center().gap_1().children(
+                                util::SPEED_PRESETS.iter().copied().map(|preset| {
+                                    settings::choice_chip(
+                                        format!("speed-{preset}"),
+                                        format_speed(preset),
+                                        (preset - speed).abs() < 0.01,
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.set_speed(preset, cx)
+                                        }),
+                                    )
+                                }),
+                            ))
+                            .child(settings::section_label("AUDIO"))
+                            .child(
+                                div()
+                                    .pt_1()
+                                    .pb_1()
+                                    .text_xs()
+                                    .text_color(theme::muted())
+                                    .child("Default volume"),
+                            )
+                            .child(div().flex().items_center().gap_1().children(
+                                settings::VOLUME_PRESETS.iter().copied().map(|preset| {
+                                    settings::choice_chip(
+                                        format!("vol-{preset}"),
+                                        format!("{}%", (preset * 100.0).round() as i32),
+                                        (preset - volume).abs() < 0.01,
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.muted = false;
+                                            this.set_volume(preset, cx);
+                                        }),
+                                    )
+                                }),
+                            ))
+                            .child(settings::section_label("SUBTITLES"))
+                            .child(settings::setting_row(
+                                "Show by default",
+                                settings::toggle(
+                                    "set-subs",
+                                    subs_on,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.settings.subtitle_enabled =
+                                            !this.settings.subtitle_enabled;
+                                        this.settings.save();
+                                        if let Some(session) = this.subtitles.as_mut() {
+                                            session.refresh_tracks();
+                                            if this.settings.subtitle_enabled {
+                                                if session.current().is_none() {
+                                                    if let Some(track) = session.tracks().first() {
+                                                        let index = track.index;
+                                                        session.set_current(Some(index));
+                                                    }
+                                                }
+                                            } else {
+                                                session.set_current(None);
+                                            }
+                                        }
+                                        cx.notify();
+                                    }),
+                                ),
+                            ))
+                            .child(settings::setting_row(
+                                "Background",
+                                settings::toggle(
+                                    "set-subs-bg",
+                                    subs_bg,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.settings.subtitle_background =
+                                            !this.settings.subtitle_background;
+                                        this.settings.save();
+                                        cx.notify();
+                                    }),
+                                ),
+                            ))
+                            .child(settings::setting_row(
+                                "Default size",
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(settings::choice_chip(
+                                        "sub-smaller".into(),
+                                        "A-",
+                                        false,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.settings.cycle_subtitle_size(false);
+                                            this.settings.save();
+                                            cx.notify();
+                                        }),
+                                    ))
+                                    .child(
+                                        div()
+                                            .w(px(40.))
+                                            .text_xs()
+                                            .text_color(theme::white())
+                                            .child(format!("{}px", subs_size as i32)),
+                                    )
+                                    .child(settings::choice_chip(
+                                        "sub-larger".into(),
+                                        "A+",
+                                        false,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.settings.cycle_subtitle_size(true);
+                                            this.settings.save();
+                                            cx.notify();
+                                        }),
+                                    )),
+                            )),
+                    ),
+            )
     }
 
     fn render_top_bar(&self, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -787,6 +1189,26 @@ impl Player {
                         self.looping,
                         false,
                         cx.listener(|this, _, _, cx| this.toggle_loop(cx)),
+                    ))
+                    .child(icon::icon_button(
+                        "captions",
+                        Icon::Captions,
+                        self.subtitles
+                            .as_ref()
+                            .and_then(SubtitleSession::current)
+                            .is_some(),
+                        self.subtitles
+                            .as_ref()
+                            .map(|session| session.tracks().is_empty())
+                            .unwrap_or(true),
+                        cx.listener(|this, _, _, cx| this.cycle_subtitles(cx)),
+                    ))
+                    .child(icon::icon_button(
+                        "settings",
+                        Icon::Settings,
+                        self.settings_open,
+                        false,
+                        cx.listener(|this, _, _, cx| this.toggle_settings(cx)),
                     ))
                     .child(icon::icon_button(
                         "open",

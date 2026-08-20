@@ -17,7 +17,10 @@ pub enum Icon {
     Fullscreen,
     FullscreenExit,
     Repeat,
+    Captions,
     Folder,
+    Settings,
+    Close,
 }
 
 impl Icon {
@@ -34,7 +37,10 @@ impl Icon {
             Self::Fullscreen => "icons/fullscreen.svg",
             Self::FullscreenExit => "icons/fullscreen_exit.svg",
             Self::Repeat => "icons/repeat.svg",
+            Self::Captions => "icons/captions.svg",
             Self::Folder => "icons/folder.svg",
+            Self::Settings => "icons/settings.svg",
+            Self::Close => "icons/close.svg",
         }
     }
 }

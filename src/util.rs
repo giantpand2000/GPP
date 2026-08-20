@@ -7,6 +7,8 @@ pub const VIDEO_EXTENSIONS: &[&str] = &[
     "ogv", "3gp", "asf", "vob", "mxf", "rmvb", "m3u8", "mpd",
 ];
 
+pub const SUBTITLE_EXTENSIONS: &[&str] = &["srt", "ass", "ssa", "vtt", "sub", "lrc"];
+
 pub const SPEED_PRESETS: &[f64] = &[0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
 #[derive(Clone, Debug)]
@@ -66,10 +68,18 @@ impl MediaSource {
 }
 
 pub fn is_video_path(path: &Path) -> bool {
+    has_extension(path, VIDEO_EXTENSIONS)
+}
+
+pub fn is_subtitle_path(path: &Path) -> bool {
+    has_extension(path, SUBTITLE_EXTENSIONS)
+}
+
+fn has_extension(path: &Path, extensions: &[&str]) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| {
-            VIDEO_EXTENSIONS
+            extensions
                 .iter()
                 .any(|candidate| ext.eq_ignore_ascii_case(candidate))
         })
@@ -89,7 +99,7 @@ pub fn collect_media(paths: impl IntoIterator<Item = PathBuf>) -> Vec<MediaSourc
                 children.sort();
                 media.extend(children.into_iter().map(MediaSource::from_path));
             }
-        } else if is_video_path(&path) || path.is_file() {
+        } else if is_video_path(&path) {
             media.push(MediaSource::from_path(path));
         }
     }

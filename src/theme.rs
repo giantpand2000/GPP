@@ -36,6 +36,18 @@ pub fn overlay() -> Hsla {
     rgba(0x00000080).into()
 }
 
+pub fn settings_veil() -> Hsla {
+    rgba(0x000000B8).into()
+}
+
+pub fn settings_panel() -> Hsla {
+    rgba(0x212121F5).into()
+}
+
+pub fn toggle_off() -> Hsla {
+    rgba(0xFFFFFF38).into()
+}
+
 pub fn bottom_gradient() -> gpui::Background {
     linear_gradient(
         180.,

@@ -2224,8 +2224,11 @@ dependencies = [
  "env_logger",
  "gpui",
  "gpui-video-player",
+ "gstreamer-app",
  "log",
  "rfd",
+ "serde",
+ "serde_json",
  "url",
 ]
 

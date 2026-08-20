@@ -2,6 +2,8 @@ mod actions;
 mod assets;
 mod icon;
 mod player;
+mod settings;
+mod subtitles;
 mod theme;
 mod util;
 
@@ -98,11 +100,22 @@ fn keybindings() -> Vec<KeyBinding> {
         KeyBinding::new("f", ToggleFullscreen, None),
         KeyBinding::new(fullscreen, ToggleFullscreen, None),
         KeyBinding::new("s", CycleSpeed, None),
+        KeyBinding::new("c", CycleSubtitles, None),
         KeyBinding::new("n", NextTrack, None),
         KeyBinding::new("p", PrevTrack, None),
         KeyBinding::new("home", Restart, None),
         KeyBinding::new("0", Restart, None),
         KeyBinding::new("escape", ExitFullscreen, None),
+        KeyBinding::new("comma", ToggleSettings, None),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-,"
+            } else {
+                "ctrl-,"
+            },
+            ToggleSettings,
+            None,
+        ),
     ]
 }
 
@@ -112,6 +125,7 @@ fn app_menus() -> Vec<Menu> {
             name: "GPP".into(),
             items: vec![
                 MenuItem::action("Open…", OpenFile),
+                MenuItem::action("Settings", ToggleSettings),
                 MenuItem::separator(),
                 MenuItem::action("Quit", Quit),
             ],
@@ -130,6 +144,7 @@ fn app_menus() -> Vec<Menu> {
                 MenuItem::action("Mute", ToggleMute),
                 MenuItem::action("Loop", ToggleLoop),
                 MenuItem::action("Cycle Speed", CycleSpeed),
+                MenuItem::action("Cycle Subtitles", CycleSubtitles),
                 MenuItem::action("Fullscreen", ToggleFullscreen),
             ],
         },
