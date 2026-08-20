@@ -1,0 +1,11 @@
+prefix=/Library/Frameworks/GStreamer.framework/Versions/1.0
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: GStreamer Application Library
+Description: Helper functions and base classes for application integration
+Version: 1.24.1
+Requires: gstreamer-1.0 gstreamer-base-1.0
+Libs: -L${libdir} -lgstapp-1.0
+Cflags: -I${includedir}/gstreamer-1.0

@@ -1,0 +1,5 @@
+# Prefer the local pkg-config wrapper so a runtime-only GStreamer.framework
+# install (no system .pc files) can still link on macOS. The wrapper falls
+# back to whatever `pkg-config` is on PATH for Homebrew / Linux setups.
+[env]
+PKG_CONFIG = { value = "pkgconfig/pkg-config.sh", relative = true }

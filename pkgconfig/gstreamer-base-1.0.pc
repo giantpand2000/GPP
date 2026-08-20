@@ -1,0 +1,11 @@
+prefix=/Library/Frameworks/GStreamer.framework/Versions/1.0
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: GStreamer base classes
+Description: Base classes for GStreamer elements
+Version: 1.24.1
+Requires: gstreamer-1.0
+Libs: -L${libdir} -lgstbase-1.0
+Cflags: -I${includedir}/gstreamer-1.0

@@ -1,0 +1,22 @@
+[package]
+name = "gpp"
+version = "0.1.0"
+edition = "2024"
+description = "A GPU-accelerated video player built with GPUI"
+license = "MIT"
+publish = false
+keywords = ["gpui", "video", "player", "gstreamer"]
+categories = ["multimedia", "gui"]
+
+[dependencies]
+env_logger = "0.11"
+gpui = "0.2.2"
+gpui-video-player = "0.1.2"
+log = "0.4"
+rfd = "0.15"
+url = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

@@ -1,0 +1,11 @@
+prefix=/Library/Frameworks/GStreamer.framework/Versions/1.0
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: GIO
+Description: GLib I/O library
+Version: 2.74.1
+Requires: glib-2.0 gobject-2.0 gmodule-2.0
+Libs: -L${libdir} -lgio-2.0
+Cflags: -I${includedir}/glib-2.0 -I${libdir}/glib-2.0/include
