@@ -76,16 +76,26 @@ pub fn open(
 impl SubtitleSession {
     pub fn refresh_tracks(&mut self) {
         let count = self.pipeline.property::<i32>("n-text").max(0);
-        let mut tracks = Vec::new();
-        for index in 0..count {
-            tracks.push(SubtitleTrack {
+        // playbin can report n-text=0 while text is disabled or before
+        // preroll. Keep the last known list so Off → first-track still works.
+        if count <= 0 {
+            return;
+        }
+        let first_discovery = self.tracks.is_empty();
+        self.tracks = (0..count)
+            .map(|index| SubtitleTrack {
                 index,
                 label: track_label(&self.pipeline, index),
-            });
+            })
+            .collect();
+        if first_discovery {
+            let current = self.pipeline.property::<i32>("current-text");
+            self.current = if current >= 0 { Some(current) } else { None };
+        } else if let Some(current) = self.current
+            && !self.tracks.iter().any(|track| track.index == current)
+        {
+            self.current = self.tracks.first().map(|track| track.index);
         }
-        self.tracks = tracks;
-        let current = self.pipeline.property::<i32>("current-text");
-        self.current = if current >= 0 { Some(current) } else { None };
     }
 
     pub fn tracks(&self) -> &[SubtitleTrack] {
@@ -105,9 +115,12 @@ impl SubtitleSession {
     }
 
     pub fn set_current(&mut self, index: Option<i32>) {
-        let value = index.unwrap_or(-1);
-        self.pipeline.set_property("current-text", value);
         self.current = index;
+        // Do not set current-text to -1. playbin then either reports n-text=0
+        // or clamps back to the last stream, so cycling cannot leave Off.
+        if let Some(index) = index {
+            self.pipeline.set_property("current-text", index);
+        }
         if let Ok(mut cues) = self.cues.lock() {
             cues.clear();
         }
@@ -119,13 +132,7 @@ impl SubtitleSession {
             self.set_current(None);
             return "Subtitles off".into();
         }
-        let next = match self.current {
-            None => Some(self.tracks[0].index),
-            Some(current) => match self.tracks.iter().position(|track| track.index == current) {
-                Some(pos) if pos + 1 < self.tracks.len() => Some(self.tracks[pos + 1].index),
-                _ => None,
-            },
-        };
+        let next = next_subtitle_selection(&self.tracks, self.current);
         self.set_current(next);
         match next {
             Some(index) => self
@@ -147,6 +154,9 @@ impl SubtitleSession {
     }
 
     pub fn cue_at(&self, position: Duration) -> Option<String> {
+        if self.current.is_none() {
+            return None;
+        }
         self.drain_samples();
         let Ok(mut cues) = self.cues.lock() else {
             return None;
@@ -316,6 +326,19 @@ pub fn clean_subtitle_text(input: &str) -> String {
         .join("\n")
 }
 
+fn next_subtitle_selection(tracks: &[SubtitleTrack], current: Option<i32>) -> Option<i32> {
+    if tracks.is_empty() {
+        return None;
+    }
+    match current {
+        None => Some(tracks[0].index),
+        Some(current) => match tracks.iter().position(|track| track.index == current) {
+            Some(pos) if pos + 1 < tracks.len() => Some(tracks[pos + 1].index),
+            _ => None,
+        },
+    }
+}
+
 fn escape_launch_uri(uri: &str) -> String {
     uri.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -341,5 +364,24 @@ mod tests {
             "Hello\nworld"
         );
         assert_eq!(clean_subtitle_text("<i>Hi</i> there"), "Hi there");
+    }
+
+    #[test]
+    fn subtitle_cycle_wraps_from_off_back_to_first_track() {
+        let tracks = vec![
+            SubtitleTrack {
+                index: 0,
+                label: "English".into(),
+            },
+            SubtitleTrack {
+                index: 1,
+                label: "中文".into(),
+            },
+        ];
+        assert_eq!(next_subtitle_selection(&tracks, Some(0)), Some(1));
+        assert_eq!(next_subtitle_selection(&tracks, Some(1)), None);
+        assert_eq!(next_subtitle_selection(&tracks, None), Some(0));
+        assert_eq!(next_subtitle_selection(&tracks, Some(99)), None);
+        assert_eq!(next_subtitle_selection(&[], None), None);
     }
 }
