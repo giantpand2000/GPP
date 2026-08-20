@@ -86,6 +86,34 @@ fn has_extension(path: &Path, extensions: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
+/// Turn Finder / `open -a` URL strings into playable sources.
+pub fn media_from_open_strings<I>(inputs: I) -> Vec<MediaSource>
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    let mut paths = Vec::new();
+    let mut urls = Vec::new();
+    for input in inputs {
+        let raw = input.as_ref().trim();
+        if raw.is_empty() {
+            continue;
+        }
+        match MediaSource::parse(raw) {
+            Ok(MediaSource::File(path)) => paths.push(path),
+            Ok(MediaSource::Url(url)) if url.scheme() == "file" => match url.to_file_path() {
+                Ok(path) => paths.push(path),
+                Err(()) => urls.push(MediaSource::Url(url)),
+            },
+            Ok(source) => urls.push(source),
+            Err(_) => {}
+        }
+    }
+    let mut media = collect_media(paths);
+    media.extend(urls);
+    media
+}
+
 pub fn collect_media(paths: impl IntoIterator<Item = PathBuf>) -> Vec<MediaSource> {
     let mut media = Vec::new();
     for path in paths {
@@ -174,5 +202,16 @@ mod tests {
     fn cycles_speed_presets() {
         assert_eq!(next_speed(1.0), 1.25);
         assert_eq!(next_speed(2.0), 0.5);
+    }
+
+    #[test]
+    fn parses_finder_file_urls() {
+        let sources =
+            media_from_open_strings(["file:///tmp/movie.mp4", "https://example.com/a.m3u8"]);
+        assert!(
+            sources
+                .iter()
+                .any(|source| matches!(source, MediaSource::Url(_)))
+        );
     }
 }

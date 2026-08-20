@@ -10,43 +10,66 @@ mod util;
 use actions::*;
 use assets::Assets;
 use gpui::{
-    App, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds,
+    App, Application, Bounds, KeyBinding, Menu, MenuItem, Timer, TitlebarOptions, WindowBounds,
     WindowOptions, prelude::*, px, size,
 };
 use player::Player;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     configure_gstreamer();
 
-    let initial = std::env::args()
-        .nth(1)
-        .and_then(|arg| match util::MediaSource::parse(&arg) {
-            Ok(source) => Some(source),
-            Err(err) => {
-                eprintln!("gpp: {err}");
-                None
-            }
-        });
-
-    Application::new()
-        .with_assets(Assets::new())
-        .run(move |cx: &mut App| {
-            cx.activate(true);
-            cx.on_action(|_: &Quit, cx| cx.quit());
-            cx.bind_keys(keybindings());
-            cx.set_menus(app_menus());
-            cx.on_window_closed(|cx| {
-                if cx.windows().is_empty() {
-                    cx.quit();
+    let argv_source =
+        std::env::args()
+            .nth(1)
+            .and_then(|arg| match util::MediaSource::parse(&arg) {
+                Ok(source) => Some(source),
+                Err(err) => {
+                    eprintln!("gpp: {err}");
+                    None
                 }
-            })
-            .detach();
+            });
 
-            let bounds = Bounds::centered(None, size(px(1120.), px(680.)), cx);
-            let initial = initial.clone();
-            cx.open_window(
+    // Finder / `open -a` send file URLs through Apple Events, not argv.
+    let pending_opens: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let pending_for_callback = pending_opens.clone();
+
+    let app = Application::new().with_assets(Assets::new());
+    app.on_open_urls(move |urls| {
+        if let Ok(mut pending) = pending_for_callback.lock() {
+            pending.extend(urls);
+        }
+    });
+    app.run(move |cx: &mut App| {
+        cx.activate(true);
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.bind_keys(keybindings());
+        cx.set_menus(app_menus());
+        cx.on_window_closed(|cx| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+
+        let queued = pending_opens
+            .lock()
+            .map(|mut pending| pending.drain(..).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut sources = util::media_from_open_strings(&queued);
+        if sources.is_empty() {
+            if let Some(source) = argv_source.clone() {
+                sources.push(source);
+            }
+        }
+        let initial = sources.first().cloned();
+
+        let bounds = Bounds::centered(None, size(px(1120.), px(680.)), cx);
+        let handle = cx
+            .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(640.), px(360.))),
@@ -55,14 +78,41 @@ fn main() {
                         appears_transparent: false,
                         ..Default::default()
                     }),
-                    app_id: Some("gpp".into()),
+                    app_id: Some("dev.gpp.player".into()),
                     focus: true,
                     ..Default::default()
                 },
                 |window, cx| cx.new(|cx| Player::new(initial, window, cx)),
             )
             .unwrap();
-        });
+
+        if sources.len() > 1 {
+            let _ = handle.update(cx, |player, _, cx| {
+                player.open_sources(sources, cx);
+            });
+        }
+
+        let pending = pending_opens.clone();
+        cx.spawn(async move |cx| {
+            loop {
+                Timer::after(Duration::from_millis(80)).await;
+                let urls = match pending.lock() {
+                    Ok(mut pending) => pending.drain(..).collect::<Vec<_>>(),
+                    Err(_) => return,
+                };
+                if urls.is_empty() {
+                    continue;
+                }
+                if handle
+                    .update(cx, |player, _, cx| player.open_from_urls(&urls, cx))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
+        .detach();
+    });
 }
 
 fn keybindings() -> Vec<KeyBinding> {

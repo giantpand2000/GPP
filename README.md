@@ -55,6 +55,17 @@ cargo run --release -- /path/to/movie.mp4
 cargo run --release -- https://example.com/stream.m3u8
 ```
 
+## Package (macOS)
+
+```bash
+./scripts/package-macos.sh
+open dist/GPP.app
+# or install for Finder “Open With”:
+./scripts/package-macos.sh --install
+```
+
+This builds `dist/GPP.app`, compiles `assets/app-icon.png` into `AppIcon.icns`, and registers the playable video extensions (mp4, mkv, webm, mov, and the rest of the list in `src/util.rs`). GPP still uses the system GStreamer runtime at `/Library/Frameworks/GStreamer.framework`.
+
 ## Keyboard
 
 | Key | Action |

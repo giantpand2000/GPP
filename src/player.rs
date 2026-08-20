@@ -146,6 +146,17 @@ impl Player {
             .unwrap_or_else(|| "GPP".into())
     }
 
+    pub(crate) fn open_from_urls(&mut self, urls: &[String], cx: &mut Context<Self>) {
+        self.open_sources(util::media_from_open_strings(urls), cx);
+    }
+
+    pub(crate) fn open_sources(&mut self, sources: Vec<MediaSource>, cx: &mut Context<Self>) {
+        if sources.is_empty() {
+            return;
+        }
+        self.load_sources(sources, 0, cx);
+    }
+
     fn open_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.dialog_open {
             return;
