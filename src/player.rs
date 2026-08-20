@@ -97,6 +97,38 @@ impl Player {
             player.open_current(cx);
         }
 
+        // GPUI's request_animation_frame stops if a paint sees `paused()`. A
+        // GStreamer flush-seek can report Paused and freeze the overlay until a
+        // hover change (mouse leaving the speed button) notifies again. Keep
+        // ticking while the user-requested state is playing.
+        cx.spawn(async move |this, cx| {
+            loop {
+                let playing = this
+                    .update(cx, |this, _| {
+                        this.video
+                            .as_ref()
+                            .is_some_and(|video| !video.paused() && !video.eos())
+                    })
+                    .unwrap_or(false);
+                Timer::after(Duration::from_millis(if playing { 16 } else { 200 })).await;
+                if this
+                    .update(cx, |this, cx| {
+                        if this
+                            .video
+                            .as_ref()
+                            .is_some_and(|video| !video.paused() && !video.eos())
+                        {
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
         player
     }
 
@@ -344,23 +376,30 @@ impl Player {
 
     fn cycle_speed(&mut self, cx: &mut Context<Self>) {
         self.bump_interaction();
-        self.speed = next_speed(self.speed);
-        if let Some(video) = &self.video {
-            let _ = video.set_speed(self.speed);
-        }
-        self.settings.speed = self.speed;
-        self.settings.save();
-        cx.notify();
+        self.apply_speed(next_speed(self.speed), cx);
     }
 
     fn set_speed(&mut self, speed: f64, cx: &mut Context<Self>) {
+        self.apply_speed(speed, cx);
+    }
+
+    fn apply_speed(&mut self, speed: f64, cx: &mut Context<Self>) {
         self.speed = speed;
-        if let Some(video) = &self.video {
-            let _ = video.set_speed(self.speed);
-        }
-        self.settings.speed = self.speed;
+        self.settings.speed = speed;
         self.settings.save();
         cx.notify();
+
+        // Flush-seek blocks; never run it on the UI/click path or while a
+        // view lock is held — that freezes painting until the next hover.
+        let Some(video) = self.video.clone() else {
+            return;
+        };
+        cx.background_spawn(async move {
+            if let Err(err) = video.set_speed(speed) {
+                log::warn!("failed to set playback speed to {speed}: {err}");
+            }
+        })
+        .detach();
     }
 
     fn toggle_settings(&mut self, cx: &mut Context<Self>) {

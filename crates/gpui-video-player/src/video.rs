@@ -2,8 +2,8 @@ use crate::Error;
 use gstreamer as gst;
 use gstreamer_app as gst_app;
 use gstreamer_app::prelude::*;
-use gstreamer_video::video_frame::VideoFrameExt;
 use gstreamer_video as gst_video;
+use gstreamer_video::video_frame::VideoFrameExt;
 // Note: GPUI imports removed since we're using simple Vec<u8> for RGBA data
 use gst::message::MessageView;
 use parking_lot::{Mutex, RwLock};
@@ -57,7 +57,11 @@ impl Frame {
 
     /// Tightly packed NV12 (Y stride = width). GStreamer buffers are often padded
     /// to 32/64 bytes; treating that padding as pixels shears the image.
-    pub fn packed_nv12(&self, fallback_width: i32, fallback_height: i32) -> Option<(Vec<u8>, u32, u32)> {
+    pub fn packed_nv12(
+        &self,
+        fallback_width: i32,
+        fallback_height: i32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
         packed_nv12_from_sample(&self.0, fallback_width, fallback_height)
     }
 }
@@ -196,6 +200,7 @@ pub(crate) struct Internal {
     pub(crate) frame_buffer_capacity: Arc<AtomicUsize>,
     pub(crate) last_frame_time: Arc<Mutex<Instant>>,
     pub(crate) looping: Arc<AtomicBool>,
+    pub(crate) is_paused: Arc<AtomicBool>,
     pub(crate) is_eos: Arc<AtomicBool>,
     pub(crate) restart_stream: bool,
 
@@ -260,33 +265,6 @@ impl Internal {
         Ok(())
     }
 
-    pub(crate) fn set_speed(&mut self, speed: f64) -> Result<(), Error> {
-        let Some(position) = self.source.query_position::<gst::ClockTime>() else {
-            return Err(Error::Caps);
-        };
-        if speed > 0.0 {
-            self.source.seek(
-                speed,
-                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
-                gst::SeekType::Set,
-                position,
-                gst::SeekType::End,
-                gst::ClockTime::from_seconds(0),
-            )?;
-        } else {
-            self.source.seek(
-                speed,
-                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
-                gst::SeekType::Set,
-                gst::ClockTime::from_seconds(0),
-                gst::SeekType::Set,
-                position,
-            )?;
-        }
-        self.speed.store(speed.to_bits(), Ordering::SeqCst);
-        Ok(())
-    }
-
     pub(crate) fn restart_stream(&mut self) -> Result<(), Error> {
         self.is_eos.store(false, Ordering::SeqCst);
         self.set_paused(false);
@@ -295,6 +273,7 @@ impl Internal {
     }
 
     pub(crate) fn set_paused(&mut self, paused: bool) {
+        self.is_paused.store(paused, Ordering::SeqCst);
         self.source
             .set_state(if paused {
                 gst::State::Paused
@@ -309,8 +288,40 @@ impl Internal {
     }
 
     pub(crate) fn paused(&self) -> bool {
-        self.source.state(gst::ClockTime::ZERO).1 == gst::State::Paused
+        // Requested pause flag, not GstPipeline::state(). A flush seek (used by
+        // set_speed) can briefly report Paused and would stop the GPUI
+        // animation-frame loop until the next input event.
+        self.is_paused.load(Ordering::SeqCst)
     }
+}
+
+/// Change rate without `ACCURATE`: flush-accurate seeks stall the pipeline and
+/// the UI thread if they run while a view lock is held.
+fn apply_playback_rate(pipeline: &gst::Pipeline, speed: f64) -> Result<(), Error> {
+    let Some(position) = pipeline.query_position::<gst::ClockTime>() else {
+        return Err(Error::Caps);
+    };
+    let flags = gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT;
+    if speed > 0.0 {
+        pipeline.seek(
+            speed,
+            flags,
+            gst::SeekType::Set,
+            position,
+            gst::SeekType::End,
+            gst::ClockTime::from_seconds(0),
+        )?;
+    } else {
+        pipeline.seek(
+            speed,
+            flags,
+            gst::SeekType::Set,
+            gst::ClockTime::from_seconds(0),
+            gst::SeekType::Set,
+            position,
+        )?;
+    }
+    Ok(())
 }
 
 /// A multimedia video loaded from a URI (e.g., a local file path or HTTP stream).
@@ -682,6 +693,7 @@ impl Video {
             frame_buffer_capacity,
             last_frame_time,
             looping: looping_flag,
+            is_paused: Arc::new(AtomicBool::new(false)),
             is_eos,
             restart_stream: false,
 
@@ -795,7 +807,10 @@ impl Video {
 
     /// Get if the stream ended or not.
     pub fn eos(&self) -> bool {
-        self.read().is_eos.load(Ordering::Acquire)
+        self.0
+            .try_read()
+            .map(|inner| inner.is_eos.load(Ordering::Acquire))
+            .unwrap_or(false)
     }
 
     /// Get if the media will loop or not.
@@ -815,7 +830,10 @@ impl Video {
 
     /// Get if the media is paused or not.
     pub fn paused(&self) -> bool {
-        self.read().paused()
+        self.0
+            .try_read()
+            .map(|inner| inner.paused())
+            .unwrap_or(false)
     }
 
     /// Jumps to a specific position in the media.
@@ -825,7 +843,12 @@ impl Video {
 
     /// Set the playback speed of the media.
     pub fn set_speed(&self, speed: f64) -> Result<(), Error> {
-        self.write().set_speed(speed)
+        // Clone the pipeline and drop the video lock before the blocking seek so
+        // the UI thread can still read pause/EOS flags during the flush.
+        let pipeline = self.read().source.clone();
+        apply_playback_rate(&pipeline, speed)?;
+        self.read().speed.store(speed.to_bits(), Ordering::SeqCst);
+        Ok(())
     }
 
     /// Get the current playback speed.
@@ -861,10 +884,7 @@ impl Video {
     /// Get the current NV12 frame data if available.
     pub fn current_frame_data(&self) -> Option<(Vec<u8>, u32, u32)> {
         let inner = self.read();
-        inner
-            .frame
-            .lock()
-            .packed_nv12(inner.width, inner.height)
+        inner.frame.lock().packed_nv12(inner.width, inner.height)
     }
 
     /// Returns true if a new frame arrived since last check and resets the flag.
