@@ -951,7 +951,7 @@ impl Player {
             .overflow_hidden()
             .when_some(items, |this, items| {
                 this.children(items.into_iter().map(|item| {
-                    // Glyph copies, not box-shadow.
+                    // Glyph copies, not box-shadow. Fade the whole comment.
                     let text = item.text.clone();
                     let stroke = gpui::hsla(0., 0., 0., 0.22);
                     div()
@@ -965,6 +965,7 @@ impl Player {
                         .text_size(px(item.font_size))
                         .font_weight(FontWeight::MEDIUM)
                         .whitespace_nowrap()
+                        .opacity(item.opacity)
                         .text_color(item.color)
                         .children(
                             [
