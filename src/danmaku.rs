@@ -254,7 +254,9 @@ fn looks_like_danmaku(head: &str) -> bool {
         || trimmed.contains("<d p='")
         || (trimmed.starts_with('[') && (head.contains("\"text\"") || head.contains("\"msg\"")))
         || (trimmed.starts_with('{')
-            && (head.contains("\"comments\"") || head.contains("\"danmaku\"")))
+            && (head.contains("\"comments\"")
+                || head.contains("\"danmaku\"")
+                || (head.contains("\"p\"") && head.contains("\"m\""))))
 }
 
 fn decode_bytes(bytes: &[u8]) -> String {
@@ -314,6 +316,21 @@ fn parse_d_tag(rest: &str) -> Option<(Comment, usize)> {
             text_end + 4,
         ));
     }
+    let (time, mode, color) = parse_attr_list(params);
+    Some((
+        Comment {
+            time: Duration::from_secs_f64(time),
+            text,
+            color,
+            mode,
+        },
+        text_end + 4,
+    ))
+}
+
+/// XML: time,mode,fontsize,color,...
+/// Bilibili JSON exports: time,mode,color,extra
+fn parse_attr_list(params: &str) -> (f64, Mode, u32) {
     let mut parts = params.split(',');
     let time = parts
         .next()
@@ -329,26 +346,21 @@ fn parse_d_tag(rest: &str) -> Option<(Comment, usize)> {
         5 => Mode::Top,
         _ => Mode::Scroll,
     };
-    let _size = parts.next();
-    let color = parts
-        .next()
-        .and_then(|part| part.parse::<u32>().ok())
-        .unwrap_or(0xFFFFFF);
-    Some((
-        Comment {
-            time: Duration::from_secs_f64(time),
-            text,
-            color,
-            mode,
-        },
-        text_end + 4,
-    ))
+    let third = parts.next().and_then(|part| part.parse::<u32>().ok());
+    let fourth = parts.next().and_then(|part| part.parse::<u32>().ok());
+    let color = match third {
+        Some(value) if value > 255 => value,
+        Some(_) => fourth.unwrap_or(0xFFFFFF),
+        None => 0xFFFFFF,
+    };
+    (time, mode, color)
 }
 
 #[derive(Deserialize)]
 struct JsonComment {
     #[serde(alias = "t", alias = "stime", alias = "time_ms")]
     time: Option<f64>,
+    p: Option<String>,
     #[serde(alias = "msg", alias = "content", alias = "m")]
     text: Option<String>,
     #[serde(alias = "c")]
@@ -382,17 +394,23 @@ fn json_to_comment(item: JsonComment) -> Option<Comment> {
     if text.is_empty() {
         return None;
     }
-    let time = item.time.unwrap_or(0.0);
-    let seconds = if time > 10_000.0 { time / 1000.0 } else { time };
-    Some(Comment {
-        time: Duration::from_secs_f64(seconds.max(0.0)),
-        text,
-        color: item.color.unwrap_or(0xFFFFFF),
-        mode: match item.r#type.unwrap_or(1) {
+    let (time, mode, color) = if let Some(p) = item.p.as_deref() {
+        parse_attr_list(p)
+    } else {
+        let time = item.time.unwrap_or(0.0);
+        let seconds = if time > 10_000.0 { time / 1000.0 } else { time };
+        let mode = match item.r#type.unwrap_or(1) {
             4 => Mode::Bottom,
             5 => Mode::Top,
             _ => Mode::Scroll,
-        },
+        };
+        (seconds.max(0.0), mode, item.color.unwrap_or(0xFFFFFF))
+    };
+    Some(Comment {
+        time: Duration::from_secs_f64(time),
+        text,
+        color: item.color.unwrap_or(color),
+        mode,
     })
 }
 
@@ -465,6 +483,36 @@ mod tests {
         let comments = parse(json.as_bytes()).unwrap();
         assert_eq!(comments[0].text, "hi 😀");
         assert!((comments[0].time.as_secs_f64() - 12.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn parses_bilibili_json_p_and_m() {
+        let json = r#"{"count":2,"comments":[{"cid":1,"p":"861.48,5,16707842,[BiliBili]aa","m":"hello"},{"cid":2,"p":"10.5,1,16777215,x","m":"later"}]}"#;
+        let mut comments = parse(json.as_bytes()).unwrap();
+        comments.sort_by_key(|comment| comment.time);
+        assert_eq!(comments.len(), 2);
+        assert!((comments[0].time.as_secs_f64() - 10.5).abs() < 0.01);
+        assert_eq!(comments[0].mode, Mode::Scroll);
+        assert_eq!(comments[1].mode, Mode::Top);
+        assert_eq!(comments[1].color, 16_707_842);
+        assert_eq!(comments[1].text, "hello");
+    }
+
+    #[test]
+    fn parses_ass_video_json_fixture() {
+        let path = Path::new("/tmp/ass-video.json");
+        if !path.exists() {
+            return;
+        }
+        let session = load(path).expect("load fixture");
+        assert!(session.comments.len() > 1000);
+        assert!(
+            session
+                .comments
+                .iter()
+                .any(|comment| comment.time > Duration::from_secs(60)),
+            "all comments were parked at t=0"
+        );
     }
 
     #[test]

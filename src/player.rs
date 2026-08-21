@@ -957,12 +957,13 @@ impl Player {
                         .top(px(item.y))
                         .text_size(px(item.font_size))
                         .font_weight(FontWeight::MEDIUM)
+                        .flex_none()
                         .text_color(item.color)
                         .whitespace_nowrap()
                         .shadow(vec![gpui::BoxShadow {
-                            color: gpui::rgba(0x00000099).into(),
-                            offset: gpui::point(px(0.), px(1.)),
-                            blur_radius: px(2.),
+                            color: gpui::rgba(0x00000066).into(),
+                            offset: gpui::point(px(1.), px(1.)),
+                            blur_radius: px(0.),
                             spread_radius: px(0.),
                         }])
                         .child(item.text)
