@@ -202,6 +202,8 @@ pub(crate) struct Internal {
     pub(crate) looping: Arc<AtomicBool>,
     pub(crate) is_paused: Arc<AtomicBool>,
     pub(crate) is_eos: Arc<AtomicBool>,
+    pub(crate) seeking: Arc<AtomicBool>,
+    pub(crate) pending_seek: Arc<Mutex<Option<(Duration, f64)>>>,
     pub(crate) restart_stream: bool,
 
     pub(crate) subtitle_text: Arc<Mutex<Option<String>>>,
@@ -214,7 +216,7 @@ pub(crate) struct Internal {
 }
 
 impl Internal {
-    pub(crate) fn seek(&self, position: impl Into<Position>, accurate: bool) -> Result<(), Error> {
+    pub(crate) fn seek(&self, position: impl Into<Position>, _accurate: bool) -> Result<(), Error> {
         let position = position.into();
         let current_speed = f64::from_bits(self.speed.load(Ordering::SeqCst));
 
@@ -225,7 +227,13 @@ impl Internal {
         self.frame_buffer.lock().clear();
         self.upload_frame.store(false, Ordering::SeqCst);
 
-        pipeline_seek(&self.source, current_speed, position, accurate)
+        queue_seek(
+            &self.source,
+            &self.seeking,
+            &self.pending_seek,
+            current_speed,
+            position,
+        )
     }
 
     pub(crate) fn restart_stream(&mut self) -> Result<(), Error> {
@@ -258,23 +266,10 @@ impl Internal {
     }
 }
 
-fn pipeline_seek(
-    pipeline: &gst::Pipeline,
-    speed: f64,
-    position: Position,
-    accurate: bool,
-) -> Result<(), Error> {
-    let mut flags = gst::SeekFlags::FLUSH;
-    if accurate {
-        flags |= gst::SeekFlags::ACCURATE;
-    } else {
-        flags |= gst::SeekFlags::KEY_UNIT;
-        if speed >= 0.0 {
-            flags |= gst::SeekFlags::SNAP_AFTER;
-        } else {
-            flags |= gst::SeekFlags::SNAP_BEFORE;
-        }
-    }
+fn flush_key_seek(pipeline: &gst::Pipeline, speed: f64, position: Position) -> Result<(), Error> {
+    // Interactive seeks must not use ACCURATE: Matroska playbin flush-accurate
+    // seeks often abort the demuxer with GST_FLOW_ERROR and stop playback.
+    let flags = gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT;
     match position {
         Position::Time(_) => pipeline.seek(
             speed,
@@ -294,6 +289,46 @@ fn pipeline_seek(
         )?,
     }
     Ok(())
+}
+
+fn queue_seek(
+    pipeline: &gst::Pipeline,
+    seeking: &AtomicBool,
+    pending: &Mutex<Option<(Duration, f64)>>,
+    speed: f64,
+    position: Position,
+) -> Result<(), Error> {
+    let Position::Time(time) = position else {
+        seeking.store(true, Ordering::SeqCst);
+        let result = flush_key_seek(pipeline, speed, position);
+        if result.is_err() {
+            seeking.store(false, Ordering::SeqCst);
+        }
+        return result;
+    };
+    *pending.lock() = Some((time, speed));
+    if seeking.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+    issue_latest_seek(pipeline, seeking, pending)
+}
+
+fn issue_latest_seek(
+    pipeline: &gst::Pipeline,
+    seeking: &AtomicBool,
+    pending: &Mutex<Option<(Duration, f64)>>,
+) -> Result<(), Error> {
+    let Some((time, speed)) = pending.lock().take() else {
+        seeking.store(false, Ordering::SeqCst);
+        return Ok(());
+    };
+    match flush_key_seek(pipeline, speed, Position::Time(time)) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            seeking.store(false, Ordering::SeqCst);
+            Err(err)
+        }
+    }
 }
 
 /// Change rate without `ACCURATE`: flush-accurate seeks stall the pipeline and
@@ -488,6 +523,12 @@ impl Video {
         let bus_ref = pipeline_ref.bus().unwrap();
         let is_eos = Arc::new(AtomicBool::new(false));
         let is_eos_ref = Arc::clone(&is_eos);
+        let is_paused = Arc::new(AtomicBool::new(false));
+        let is_paused_ref = Arc::clone(&is_paused);
+        let seeking = Arc::new(AtomicBool::new(false));
+        let seeking_ref = Arc::clone(&seeking);
+        let pending_seek = Arc::new(Mutex::new(None::<(Duration, f64)>));
+        let pending_seek_ref = Arc::clone(&pending_seek);
 
         let worker = std::thread::spawn(move || {
             let mut clear_subtitles_at = None;
@@ -498,23 +539,13 @@ impl Video {
                     match msg.view() {
                         MessageView::Eos(_) => {
                             if looping_ref.load(Ordering::SeqCst) {
-                                let mut flags = gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT;
                                 let current_speed =
                                     f64::from_bits(speed_ref.load(Ordering::SeqCst));
-                                if current_speed >= 0.0 {
-                                    flags |= gst::SeekFlags::SNAP_AFTER;
-                                } else {
-                                    flags |= gst::SeekFlags::SNAP_BEFORE;
-                                }
-                                match pipeline_ref.seek(
+                                seeking_ref.store(true, Ordering::SeqCst);
+                                match flush_key_seek(
+                                    &pipeline_ref,
                                     current_speed,
-                                    flags,
-                                    gst::SeekType::Set,
-                                    gst::GenericFormattedValue::from(gst::ClockTime::from_seconds(
-                                        0,
-                                    )),
-                                    gst::SeekType::None,
-                                    gst::ClockTime::NONE,
+                                    Position::Time(Duration::ZERO),
                                 ) {
                                     Ok(_) => {
                                         is_eos_ref.store(false, Ordering::SeqCst);
@@ -527,12 +558,25 @@ impl Video {
                                         continue;
                                     }
                                     Err(err) => {
+                                        seeking_ref.store(false, Ordering::SeqCst);
                                         log::error!("failed to restart video for looping: {}", err);
                                         is_eos_ref.store(true, Ordering::SeqCst);
                                     }
                                 }
                             } else {
                                 is_eos_ref.store(true, Ordering::SeqCst);
+                            }
+                        }
+                        MessageView::AsyncDone(_) => {
+                            if let Err(err) = issue_latest_seek(
+                                &pipeline_ref,
+                                &seeking_ref,
+                                &pending_seek_ref,
+                            ) {
+                                log::warn!("pending seek failed: {err}");
+                                if !is_paused_ref.load(Ordering::SeqCst) {
+                                    let _ = pipeline_ref.set_state(gst::State::Playing);
+                                }
                             }
                         }
                         MessageView::Error(err) => {
@@ -542,6 +586,12 @@ impl Video {
                                 err.src(),
                                 err.error()
                             );
+                            seeking_ref.store(false, Ordering::SeqCst);
+                            pending_seek_ref.lock().take();
+                            is_eos_ref.store(false, Ordering::SeqCst);
+                            if !is_paused_ref.load(Ordering::SeqCst) {
+                                let _ = pipeline_ref.set_state(gst::State::Playing);
+                            }
                         }
                         _ => {}
                     }
@@ -550,6 +600,10 @@ impl Video {
                 if is_eos_ref.load(Ordering::Acquire) {
                     // Stop busy-polling once EOS reached
                     std::thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+                if seeking_ref.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(4));
                     continue;
                 }
                 if let Err(err) = (|| -> Result<(), gst::FlowError> {
@@ -694,8 +748,10 @@ impl Video {
             frame_buffer_capacity,
             last_frame_time,
             looping: looping_flag,
-            is_paused: Arc::new(AtomicBool::new(false)),
+            is_paused,
             is_eos,
+            seeking,
+            pending_seek,
             restart_stream: false,
 
             subtitle_text,
@@ -838,7 +894,7 @@ impl Video {
     }
 
     /// Jumps to a specific position in the media.
-    pub fn seek(&self, position: impl Into<Position>, accurate: bool) -> Result<(), Error> {
+    pub fn seek(&self, position: impl Into<Position>, _accurate: bool) -> Result<(), Error> {
         let position = position.into();
         let inner = self.read();
         inner.is_eos.store(false, Ordering::SeqCst);
@@ -848,8 +904,10 @@ impl Video {
         inner.upload_frame.store(false, Ordering::SeqCst);
         let pipeline = inner.source.clone();
         let speed = f64::from_bits(inner.speed.load(Ordering::SeqCst));
+        let seeking = inner.seeking.clone();
+        let pending_seek = inner.pending_seek.clone();
         drop(inner);
-        pipeline_seek(&pipeline, speed, position, accurate)
+        queue_seek(&pipeline, &seeking, &pending_seek, speed, position)
     }
 
     /// Set the playback speed of the media.
