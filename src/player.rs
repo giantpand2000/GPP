@@ -836,21 +836,6 @@ impl Render for Player {
                 }),
             )
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_scroll(event, cx)))
-            .can_drop(|value, _, _| {
-                value
-                    .downcast_ref::<ExternalPaths>()
-                    .map(|paths| {
-                        paths
-                            .paths()
-                            .iter()
-                            .any(|path| path.is_dir() || is_video_path(path) || path.is_file())
-                    })
-                    .unwrap_or(false)
-            })
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.handle_drop(paths, cx)))
-            .drag_over::<ExternalPaths>(|style, _, _, _| {
-                style.border_2().border_color(theme::progress())
-            })
             .child(self.render_stage(entity.clone(), cx))
             .child(self.render_subtitle_overlay(show_chrome))
             .when(show_chrome, |this| {
@@ -860,6 +845,7 @@ impl Render for Player {
             .when(self.settings_open, |this| {
                 this.child(self.render_settings_overlay(cx))
             })
+            .child(self.render_file_drop_layer(cx))
     }
 }
 
@@ -924,6 +910,34 @@ impl Player {
             })
             .when_some(error, |this, error| {
                 this.child(status_overlay("Couldn't play this file", Some(error)))
+            })
+    }
+
+    fn render_file_drop_layer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Empty state, chrome, and settings all occlude, so a root `on_drop`
+        // never sees the hover. Keep this layer on top with a normal hitbox.
+        div()
+            .id("file-drop")
+            .absolute()
+            .inset_0()
+            .can_drop(|value, _, _| Self::can_drop_files(value))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.handle_drop(paths, cx)))
+            .drag_over::<ExternalPaths>(|style, _, _, _| {
+                style.border_2().border_color(theme::progress())
+            })
+    }
+
+    fn can_drop_files(value: &dyn std::any::Any) -> bool {
+        value
+            .downcast_ref::<ExternalPaths>()
+            .is_some_and(|paths| {
+                paths.paths().iter().any(|path| {
+                    is_video_path(path)
+                        || is_subtitle_path(path)
+                        || danmaku::is_danmaku_path(path)
+                        || path.is_dir()
+                        || path.is_file()
+                })
             })
     }
 
