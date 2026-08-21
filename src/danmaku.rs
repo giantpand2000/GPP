@@ -192,7 +192,7 @@ pub fn layout(
                 }
                 items.push(layout_item(
                     idx,
-                    &comment.text,
+                    slot.text.clone(),
                     x,
                     TOP_PADDING + row as f32 * line_height,
                     comment.color,
@@ -207,7 +207,7 @@ pub fn layout(
                 }
                 items.push(layout_item(
                     idx,
-                    &comment.text,
+                    slot.text.clone(),
                     ((view_width - slot.width) * 0.5).max(0.0),
                     TOP_PADDING + row as f32 * line_height,
                     comment.color,
@@ -222,7 +222,7 @@ pub fn layout(
                 }
                 items.push(layout_item(
                     idx,
-                    &comment.text,
+                    slot.text.clone(),
                     ((view_width - slot.width) * 0.5).max(0.0),
                     layout_h - TOP_PADDING - (row as f32 + 1.0) * line_height,
                     comment.color,
@@ -250,6 +250,7 @@ struct BakeKey {
 struct BakedSlot {
     row: Option<u16>,
     width: f32,
+    text: SharedString,
 }
 
 #[derive(Clone, Debug)]
@@ -286,10 +287,12 @@ fn bake_slots(comments: &[Comment], alloc: &AllocParams) -> Vec<BakedSlot> {
             slots.push(BakedSlot {
                 row: None,
                 width: 0.0,
+                text: SharedString::default(),
             });
             continue;
         }
         let text_w = estimate_width(&comment.text, alloc.font_size);
+        let text = SharedString::from(comment.text.clone());
         match comment.mode {
             Mode::Scroll => {
                 let vel = (alloc.view_width + text_w) / SCROLL_SECONDS * alloc.speed;
@@ -314,6 +317,7 @@ fn bake_slots(comments: &[Comment], alloc: &AllocParams) -> Vec<BakedSlot> {
                 slots.push(BakedSlot {
                     row: row.map(|row| row as u16),
                     width: text_w,
+                    text,
                 });
             }
             Mode::Top => {
@@ -324,6 +328,7 @@ fn bake_slots(comments: &[Comment], alloc: &AllocParams) -> Vec<BakedSlot> {
                 slots.push(BakedSlot {
                     row: row.map(|row| row as u16),
                     width: text_w,
+                    text,
                 });
             }
             Mode::Bottom => {
@@ -334,6 +339,7 @@ fn bake_slots(comments: &[Comment], alloc: &AllocParams) -> Vec<BakedSlot> {
                 slots.push(BakedSlot {
                     row: row.map(|row| row as u16),
                     width: text_w,
+                    text,
                 });
             }
         }
@@ -417,7 +423,7 @@ fn estimate_width(text: &str, font_size: f32) -> f32 {
 
 fn layout_item(
     id: usize,
-    text: &str,
+    text: SharedString,
     x: f32,
     y: f32,
     rgb24: u32,
@@ -427,7 +433,7 @@ fn layout_item(
 ) -> LayoutItem {
     LayoutItem {
         id: id as u64,
-        text: text.to_string().into(),
+        text,
         x,
         y,
         width,

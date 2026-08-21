@@ -21,6 +21,10 @@ use url::Url;
 const SEEK_STEP: Duration = Duration::from_secs(5);
 const SEEK_STEP_LARGE: Duration = Duration::from_secs(15);
 const HIDE_CONTROLS_AFTER: Duration = Duration::from_millis(2200);
+/// Ignore GStreamer position jitter below this; a 24fps clock steps ~42ms.
+const CLOCK_DRIFT_SYNC: Duration = Duration::from_millis(180);
+/// After a seek, GStreamer position lags until the flush completes.
+const CLOCK_SEEK_HOLD: Duration = Duration::from_millis(400);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DragTarget {
@@ -34,6 +38,59 @@ enum Status {
     Empty,
     Loading,
     Ready,
+}
+
+/// Video time is sampled only at play/pause/seek/speed and large jumps.
+/// Between those points, danmaku (and the playhead) advance with wall time
+/// so they are not quantized to the decoder's frame clock.
+struct PlaybackClock {
+    media: Duration,
+    wall: Instant,
+    speed: f64,
+    running: bool,
+    hold_until: Instant,
+    last_sample: Instant,
+}
+
+impl PlaybackClock {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            media: Duration::ZERO,
+            wall: now,
+            speed: 1.0,
+            running: false,
+            hold_until: now,
+            last_sample: now,
+        }
+    }
+
+    fn now(&self) -> Duration {
+        if !self.running || self.speed <= 0.0 {
+            return self.media;
+        }
+        let extra = self.wall.elapsed().as_secs_f64() * self.speed;
+        self.media
+            .saturating_add(Duration::from_secs_f64(extra.max(0.0)))
+    }
+
+    fn capture(&mut self, media: Duration, running: bool, speed: f64) {
+        let now = Instant::now();
+        self.media = media;
+        self.wall = now;
+        self.running = running;
+        self.speed = speed.max(0.0);
+        self.last_sample = now;
+    }
+
+    fn seek_to(&mut self, media: Duration, running: bool, speed: f64) {
+        self.capture(media, running, speed);
+        self.hold_until = Instant::now() + CLOCK_SEEK_HOLD;
+    }
+
+    fn holding(&self) -> bool {
+        Instant::now() < self.hold_until
+    }
 }
 
 pub struct Player {
@@ -63,6 +120,7 @@ pub struct Player {
     settings: Settings,
     settings_open: bool,
     settings_tab: settings::SettingsTab,
+    clock: PlaybackClock,
 }
 
 impl Player {
@@ -98,6 +156,7 @@ impl Player {
             settings,
             settings_open: false,
             settings_tab: settings::SettingsTab::Playback,
+            clock: PlaybackClock::new(),
         };
 
         if let Some(source) = initial {
@@ -118,7 +177,7 @@ impl Player {
                             .is_some_and(|video| !video.paused() && !video.eos())
                     })
                     .unwrap_or(false);
-                Timer::after(Duration::from_millis(if playing { 16 } else { 200 })).await;
+                Timer::after(Duration::from_millis(if playing { 50 } else { 200 })).await;
                 if this
                     .update(cx, |this, cx| {
                         if this
@@ -233,6 +292,7 @@ impl Player {
         self.danmaku = None;
         self.subtitle_toast = None;
         self.scrub = None;
+        self.clock = PlaybackClock::new();
         self.load_generation += 1;
         let generation = self.load_generation;
         let looping = self.looping;
@@ -302,6 +362,11 @@ impl Player {
                         });
                         this.status = Status::Ready;
                         this.error = None;
+                        this.clock.capture(
+                            Duration::ZERO,
+                            this.settings.autoplay,
+                            this.speed,
+                        );
                     }
                     Err(err) => {
                         this.video = None;
@@ -333,8 +398,11 @@ impl Player {
         if let Some(video) = self.video.clone() {
             if video.eos() {
                 let _ = video.restart_stream();
+                self.clock.seek_to(Duration::ZERO, true, self.speed);
             } else {
-                video.set_paused(!video.paused());
+                let playing = video.paused();
+                video.set_paused(!playing);
+                self.clock.capture(self.clock.now(), playing, self.speed);
             }
         } else if !self.playlist.is_empty() {
             self.open_current(cx);
@@ -355,6 +423,8 @@ impl Player {
             (position + delta).min(duration)
         };
         let _ = video.seek(target, false);
+        let playing = !video.paused() && !video.eos();
+        self.clock.seek_to(target, playing, self.speed);
         cx.notify();
     }
 
@@ -374,6 +444,8 @@ impl Player {
         if let Err(err) = video.seek(target, accurate) {
             log::warn!("seek failed: {err}");
         }
+        let playing = !video.paused() && !video.eos();
+        self.clock.seek_to(target, playing, self.speed);
         cx.notify();
     }
 
@@ -465,6 +537,8 @@ impl Player {
         self.bump_interaction();
         if let Some(video) = self.video.clone() {
             let _ = video.restart_stream();
+            let playing = !video.paused() && !video.eos();
+            self.clock.seek_to(Duration::ZERO, playing, self.speed);
         }
         cx.notify();
     }
@@ -753,7 +827,7 @@ impl Player {
         if duration <= 0.0 {
             0.0
         } else {
-            (video.position().as_secs_f64() / duration) as f32
+            (self.clock.now().as_secs_f64() / duration) as f32
         }
     }
 
@@ -762,15 +836,64 @@ impl Player {
     }
 
     fn displayed_position(&self) -> Duration {
-        if let (Some(ratio), Some(video)) = (self.scrub, self.video.as_ref()) {
-            Duration::from_secs_f64(
-                video.duration().as_secs_f64() * ratio.clamp(0.0, 1.0) as f64,
-            )
-        } else {
-            self.video
-                .as_ref()
-                .map(|video| video.position())
-                .unwrap_or(Duration::ZERO)
+        let time = self.clock.now();
+        match &self.video {
+            Some(video) => {
+                let duration = video.duration();
+                if duration.is_zero() {
+                    time
+                } else {
+                    time.min(duration)
+                }
+            }
+            None => time,
+        }
+    }
+
+    fn tick_clock(&mut self) {
+        let Some(video) = self.video.as_ref() else {
+            if self.clock.media != Duration::ZERO || self.clock.running {
+                self.clock.capture(Duration::ZERO, false, self.speed);
+            }
+            return;
+        };
+        let playing = !video.paused() && !video.eos();
+        let speed = self.speed;
+
+        if let Some(ratio) = self.scrub {
+            let duration = video.duration();
+            let media = Duration::from_secs_f64(
+                duration.as_secs_f64() * ratio.clamp(0.0, 1.0) as f64,
+            );
+            self.clock.capture(media, false, speed);
+            return;
+        }
+
+        if playing != self.clock.running || (speed - self.clock.speed).abs() > 0.001 {
+            let media = if playing == self.clock.running {
+                video.position()
+            } else {
+                self.clock.now()
+            };
+            self.clock.capture(media, playing, speed);
+            return;
+        }
+
+        if playing
+            && !self.clock.holding()
+            && self.clock.last_sample.elapsed() >= Duration::from_millis(80)
+        {
+            self.clock.last_sample = Instant::now();
+            let video_pos = video.position();
+            let predicted = self.clock.now();
+            let drift = if predicted > video_pos {
+                predicted - video_pos
+            } else {
+                video_pos - predicted
+            };
+            if drift > CLOCK_DRIFT_SYNC {
+                self.clock.capture(video_pos, true, speed);
+            }
         }
     }
 }
@@ -784,6 +907,7 @@ impl Focusable for Player {
 impl Render for Player {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.maybe_advance_on_eos(cx);
+        self.tick_clock();
 
         let playing = self
             .video
@@ -2001,4 +2125,33 @@ fn status_overlay(title: &str, detail: Option<String>) -> impl IntoElement {
                     .child(detail),
             )
         })
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+
+    #[test]
+    fn clock_advances_on_wall_time_and_freezes_when_paused() {
+        let mut clock = PlaybackClock::new();
+        clock.capture(Duration::from_millis(1_000), true, 1.0);
+        std::thread::sleep(Duration::from_millis(25));
+        let running = clock.now();
+        assert!(
+            running > Duration::from_millis(1_010),
+            "expected wall-clock interpolation, got {running:?}"
+        );
+        clock.capture(running, false, 1.0);
+        let frozen = clock.now();
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(clock.now(), frozen);
+    }
+
+    #[test]
+    fn clock_scales_elapsed_time_by_playback_speed() {
+        let mut clock = PlaybackClock::new();
+        clock.capture(Duration::ZERO, true, 2.0);
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(clock.now() > Duration::from_millis(30));
+    }
 }
