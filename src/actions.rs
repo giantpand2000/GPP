@@ -17,6 +17,7 @@ actions!(
         ToggleFullscreen,
         ExitFullscreen,
         ToggleSettings,
+        ShowAbout,
         CycleSpeed,
         CycleSubtitles,
         ToggleDanmaku,

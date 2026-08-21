@@ -14,6 +14,11 @@ pub const DANMAKU_SIZES: &[f32] = &[16.0, 20.0, 24.0, 28.0];
 pub const DANMAKU_OPACITY: &[f32] = &[0.5, 0.75, 1.0];
 pub const DANMAKU_SPEED: &[f32] = &[0.7, 1.0, 1.4];
 pub const DANMAKU_DENSITY: &[f32] = &[0.4, 0.7, 1.0];
+pub const REPOSITORY_URL: &str = env!("CARGO_PKG_REPOSITORY");
+pub const RELEASES_URL: &str = "https://github.com/giantpand2000/GPP/releases/latest";
+pub const ISSUES_URL: &str = "https://github.com/giantpand2000/GPP/issues";
+pub const THIRD_PARTY_URL: &str =
+    "https://github.com/giantpand2000/GPP/blob/main/THIRD_PARTY_NOTICES.md";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SettingsTab {
@@ -21,6 +26,7 @@ pub enum SettingsTab {
     Playback,
     Subtitles,
     Danmaku,
+    About,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -147,6 +153,36 @@ pub fn setting_row(label: &'static str, control: impl IntoElement) -> impl IntoE
         .justify_between()
         .child(div().text_sm().text_color(theme::white()).child(label))
         .child(control)
+}
+
+pub fn link_row(
+    id: &'static str,
+    label: &'static str,
+    detail: &'static str,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .w_full()
+        .min_h(px(54.))
+        .px_3()
+        .py_2()
+        .rounded_lg()
+        .flex()
+        .items_center()
+        .justify_between()
+        .cursor(CursorStyle::PointingHand)
+        .hover(|style| style.bg(theme::icon_hover()))
+        .on_click(on_click)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_sm().text_color(theme::white()).child(label))
+                .child(div().text_xs().text_color(theme::muted()).child(detail)),
+        )
+        .child(div().text_sm().text_color(theme::muted()).child("↗"))
 }
 
 pub fn tab_button(

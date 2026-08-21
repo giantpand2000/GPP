@@ -522,6 +522,13 @@ impl Player {
         cx.notify();
     }
 
+    fn show_about(&mut self, cx: &mut Context<Self>) {
+        self.settings_tab = settings::SettingsTab::About;
+        self.settings_open = true;
+        self.controls_visible = true;
+        cx.notify();
+    }
+
     fn close_settings(&mut self, cx: &mut Context<Self>) {
         if self.settings_open {
             self.settings_open = false;
@@ -980,6 +987,7 @@ impl Render for Player {
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleSettings, _, cx| this.toggle_settings(cx)))
+            .on_action(cx.listener(|this, _: &ShowAbout, _, cx| this.show_about(cx)))
             .on_action(cx.listener(|this, _: &CycleSpeed, _, cx| this.cycle_speed(cx)))
             .on_action(cx.listener(|this, _: &CycleSubtitles, _, cx| this.cycle_subtitles(cx)))
             .on_action(cx.listener(|this, _: &ToggleDanmaku, _, cx| this.toggle_danmaku(cx)))
@@ -1285,6 +1293,15 @@ impl Player {
                                     this.settings_tab = settings::SettingsTab::Danmaku;
                                     cx.notify();
                                 }),
+                            ))
+                            .child(settings::tab_button(
+                                "tab-about",
+                                "About",
+                                tab == settings::SettingsTab::About,
+                                cx.listener(|this, _, _, cx| {
+                                    this.settings_tab = settings::SettingsTab::About;
+                                    cx.notify();
+                                }),
                             )),
                     )
                     .child(
@@ -1306,8 +1323,115 @@ impl Player {
                                 settings::SettingsTab::Danmaku => {
                                     self.render_settings_danmaku(cx).into_any_element()
                                 }
+                                settings::SettingsTab::About => {
+                                    self.render_settings_about().into_any_element()
+                                }
                             }),
                     ),
+            )
+    }
+
+    fn render_settings_about(&self) -> impl IntoElement {
+        let architecture = match std::env::consts::ARCH {
+            "aarch64" => "Apple Silicon",
+            "x86_64" => "Intel",
+            other => other,
+        };
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt_5()
+            .child(
+                div()
+                    .size(px(68.))
+                    .rounded_xl()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(theme::progress())
+                    .text_2xl()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(theme::white())
+                    .child("G"),
+            )
+            .child(
+                div()
+                    .mt_3()
+                    .text_xl()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(theme::white())
+                    .child("GPP"),
+            )
+            .child(
+                div()
+                    .mt_1()
+                    .text_xs()
+                    .text_color(theme::muted())
+                    .child(format!(
+                        "Version {} · macOS {architecture}",
+                        env!("CARGO_PKG_VERSION")
+                    )),
+            )
+            .child(
+                div()
+                    .mt_3()
+                    .max_w(px(330.))
+                    .text_center()
+                    .text_sm()
+                    .text_color(theme::muted())
+                    .child("A GPU-accelerated video player built with GPUI and GStreamer."),
+            )
+            .child(
+                div()
+                    .mt_5()
+                    .w_full()
+                    .border_t_1()
+                    .border_color(theme::settings_rule()),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .pt_2()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(settings::link_row(
+                        "about-updates",
+                        "Check for Updates",
+                        "Open the latest release on GitHub",
+                        |_, _, cx| cx.open_url(settings::RELEASES_URL),
+                    ))
+                    .child(settings::link_row(
+                        "about-source",
+                        "GitHub Repository",
+                        "Source code and project documentation",
+                        |_, _, cx| cx.open_url(settings::REPOSITORY_URL),
+                    ))
+                    .child(settings::link_row(
+                        "about-issues",
+                        "Report an Issue",
+                        "Bug reports and feature requests",
+                        |_, _, cx| cx.open_url(settings::ISSUES_URL),
+                    ))
+                    .child(settings::link_row(
+                        "about-notices",
+                        "Third-Party Notices",
+                        "GStreamer and other open-source components",
+                        |_, _, cx| cx.open_url(settings::THIRD_PARTY_URL),
+                    )),
+            )
+            .child(
+                div()
+                    .mt_3()
+                    .pb_2()
+                    .text_center()
+                    .text_xs()
+                    .text_color(theme::muted())
+                    .child("Copyright © 2026 GPP contributors")
+                    .child(div().mt_1().child("Licensed under MIT OR Apache-2.0")),
             )
     }
 

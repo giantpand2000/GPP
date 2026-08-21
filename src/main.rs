@@ -176,6 +176,8 @@ fn app_menus() -> Vec<Menu> {
         Menu {
             name: "GPP".into(),
             items: vec![
+                MenuItem::action("About GPP", ShowAbout),
+                MenuItem::separator(),
                 MenuItem::action("Open…", OpenFile),
                 MenuItem::action("Settings", ToggleSettings),
                 MenuItem::separator(),

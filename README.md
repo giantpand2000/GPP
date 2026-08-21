@@ -64,6 +64,10 @@ notarized, so macOS may require you to control-click the app and choose **Open**
 the first time. Release archives include a private GStreamer runtime, so users do
 not need to install GStreamer separately.
 
+The Settings panel includes an About tab with the installed version, build
+architecture, license, project links, update page, issue tracker, and
+third-party notices. The macOS **GPP → About GPP** menu opens it directly.
+
 ## Run from source
 
 ```bash
