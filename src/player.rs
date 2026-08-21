@@ -320,7 +320,6 @@ impl Player {
                     } else {
                         speed
                     }),
-                    ..VideoOptions::default()
                 },
             )
         });
@@ -690,9 +689,7 @@ impl Player {
         if self.is_seeking() {
             return self.scrub.map(|ratio| ratio.clamp(0.0, 1.0));
         }
-        if self.video.is_none() {
-            return None;
-        }
+        self.video.as_ref()?;
         if let Some(ratio) = self.hover_seek {
             return Some(ratio);
         }
@@ -882,11 +879,7 @@ impl Player {
             self.clock.last_sample = Instant::now();
             let video_pos = video.position();
             let predicted = self.clock.now();
-            let drift = if predicted > video_pos {
-                predicted - video_pos
-            } else {
-                video_pos - predicted
-            };
+            let drift = predicted.abs_diff(video_pos);
             if drift > CLOCK_DRIFT_SYNC {
                 self.clock.capture(video_pos, true, speed);
             }

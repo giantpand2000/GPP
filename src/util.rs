@@ -50,7 +50,7 @@ impl MediaSource {
                 .path_segments()
                 .and_then(|mut segments| segments.next_back())
                 .filter(|segment| !segment.is_empty())
-                .map(|segment| percent_decode(segment))
+                .map(percent_decode)
                 .unwrap_or_else(|| url.to_string()),
         }
     }

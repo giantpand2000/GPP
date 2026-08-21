@@ -169,9 +169,8 @@ pub fn layout(
     let bake = session.bake.borrow();
     let slots = &bake.as_ref().expect("bake just populated").slots;
     let mut items = Vec::new();
-    for idx in i..j {
+    for (idx, slot) in slots.iter().enumerate().take(j).skip(i) {
         let comment = &session.comments[idx];
-        let slot = &slots[idx];
         let Some(row) = slot.row else {
             continue;
         };
@@ -193,8 +192,7 @@ pub fn layout(
                 items.push(layout_item(
                     idx,
                     slot.text.clone(),
-                    x,
-                    TOP_PADDING + row as f32 * line_height,
+                    (x, TOP_PADDING + row as f32 * line_height),
                     comment.color,
                     font_size,
                     opacity,
@@ -208,8 +206,10 @@ pub fn layout(
                 items.push(layout_item(
                     idx,
                     slot.text.clone(),
-                    ((view_width - slot.width) * 0.5).max(0.0),
-                    TOP_PADDING + row as f32 * line_height,
+                    (
+                        ((view_width - slot.width) * 0.5).max(0.0),
+                        TOP_PADDING + row as f32 * line_height,
+                    ),
                     comment.color,
                     font_size,
                     opacity,
@@ -223,8 +223,10 @@ pub fn layout(
                 items.push(layout_item(
                     idx,
                     slot.text.clone(),
-                    ((view_width - slot.width) * 0.5).max(0.0),
-                    layout_h - TOP_PADDING - (row as f32 + 1.0) * line_height,
+                    (
+                        ((view_width - slot.width) * 0.5).max(0.0),
+                        layout_h - TOP_PADDING - (row as f32 + 1.0) * line_height,
+                    ),
                     comment.color,
                     font_size,
                     opacity,
@@ -407,9 +409,7 @@ fn estimate_width(text: &str, font_size: f32) -> f32 {
     text.chars()
         .map(|ch| {
             let n = ch as u32;
-            if n >= 0x1F300 || (0x2600..=0x27BF).contains(&n) {
-                font_size
-            } else if n >= 0x2E80 {
+            if n >= 0x2E80 || (0x2600..=0x27BF).contains(&n) {
                 font_size
             } else if ch.is_ascii() {
                 font_size * 0.55
@@ -424,13 +424,13 @@ fn estimate_width(text: &str, font_size: f32) -> f32 {
 fn layout_item(
     id: usize,
     text: SharedString,
-    x: f32,
-    y: f32,
+    position: (f32, f32),
     rgb24: u32,
     font_size: f32,
     opacity: f32,
     width: f32,
 ) -> LayoutItem {
+    let (x, y) = position;
     LayoutItem {
         id: id as u64,
         text,

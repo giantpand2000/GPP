@@ -105,6 +105,19 @@ echo "==> embedding GStreamer runtime ($ARCH)"
 BUNDLED_FRAMEWORK="$CONTENTS/Frameworks/GStreamer.framework"
 ditto "$GSTREAMER_FRAMEWORK" "$BUNDLED_FRAMEWORK"
 
+# Keep the framework root canonical. Recent GStreamer packages expose extra
+# convenience links here (bin, lib, share, and similar), but codesign rejects
+# non-framework entries at this level as unsealed contents. The complete
+# runtime remains under Versions/1.0, which is where the app's rpaths point.
+find "$BUNDLED_FRAMEWORK" -mindepth 1 -maxdepth 1 ! -name Versions \
+  -exec rm -rf {} +
+for framework_entry in GStreamer Headers Resources; do
+  if [[ -e "$BUNDLED_FRAMEWORK/Versions/Current/$framework_entry" ]]; then
+    ln -s "Versions/Current/$framework_entry" \
+      "$BUNDLED_FRAMEWORK/$framework_entry"
+  fi
+done
+
 # The official package is universal. Each CI artifact is single-architecture,
 # so thin every Mach-O file to avoid shipping the other architecture twice.
 THINNED=0
