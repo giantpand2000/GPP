@@ -1,10 +1,14 @@
 # GPP
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 GPU-accelerated video player written in Rust, using [GPUI](https://www.gpui.rs/) for the UI and [GStreamer](https://gstreamer.freedesktop.org/) (via `gpui-video-player`) for playback.
 
 GPP currently targets macOS for packaged desktop releases. The Rust application
 can also be built on Linux when the required GStreamer development packages are
 available.
+
+![GPP playing a video with subtitles and danmaku](assets/screenshots/gpp-player.png)
 
 ## Features
 
