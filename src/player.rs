@@ -271,6 +271,9 @@ impl Player {
                         if !this.settings.autoplay {
                             opened.video.set_paused(true);
                         }
+                        opened
+                            .subtitles
+                            .apply_font_size(this.settings.subtitle_size);
                         if !this.settings.subtitle_enabled {
                             opened.subtitles.set_current(None);
                         }
@@ -858,10 +861,6 @@ impl Player {
     }
 
     fn render_subtitle_overlay(&self, chrome_visible: bool) -> impl IntoElement {
-        let cue = self
-            .subtitles
-            .as_ref()
-            .and_then(|session| session.cue_at(self.displayed_position()));
         let toast = self.subtitle_toast.as_ref().map(|(label, _)| label.clone());
 
         div()
@@ -883,29 +882,6 @@ impl Player {
                         .text_xs()
                         .text_color(theme::muted())
                         .child(label),
-                )
-            })
-            .when_some(cue, |this, text| {
-                this.child(
-                    div()
-                        .max_w(px(860.))
-                        .px_3()
-                        .py_1()
-                        .rounded_sm()
-                        .when(self.settings.subtitle_background, |this| {
-                            this.bg(theme::overlay())
-                        })
-                        .text_color(theme::white())
-                        .text_size(px(self.settings.subtitle_size))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .gap_1()
-                                .children(text.lines().map(|line| line.to_string())),
-                        ),
                 )
             })
     }
@@ -1104,6 +1080,10 @@ impl Player {
                                         cx.listener(|this, _, _, cx| {
                                             this.settings.cycle_subtitle_size(false);
                                             this.settings.save();
+                                            if let Some(session) = this.subtitles.as_ref() {
+                                                session
+                                                    .apply_font_size(this.settings.subtitle_size);
+                                            }
                                             cx.notify();
                                         }),
                                     ))
@@ -1121,6 +1101,10 @@ impl Player {
                                         cx.listener(|this, _, _, cx| {
                                             this.settings.cycle_subtitle_size(true);
                                             this.settings.save();
+                                            if let Some(session) = this.subtitles.as_ref() {
+                                                session
+                                                    .apply_font_size(this.settings.subtitle_size);
+                                            }
                                             cx.notify();
                                         }),
                                     )),

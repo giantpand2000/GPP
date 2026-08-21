@@ -1,11 +1,9 @@
 use gpui_video_player::gst;
 use gpui_video_player::{Error as VideoError, Video, VideoOptions};
+use gst::glib::FlagsClass;
 use gst::prelude::*;
 use gstreamer_app as gst_app;
-use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::Mutex;
-use std::time::Duration;
 use url::Url;
 
 use crate::util;
@@ -16,19 +14,10 @@ pub struct SubtitleTrack {
     pub label: String,
 }
 
-#[derive(Clone, Debug)]
-struct Cue {
-    start: Duration,
-    end: Duration,
-    text: String,
-}
-
 pub struct SubtitleSession {
     pipeline: gst::Pipeline,
-    text_sink: gst_app::AppSink,
     tracks: Vec<SubtitleTrack>,
     current: Option<i32>,
-    cues: Mutex<VecDeque<Cue>>,
 }
 
 pub struct OpenedMedia {
@@ -52,8 +41,8 @@ pub fn open(
         .downcast::<gst::Pipeline>()
         .map_err(|_| "failed to create playbin pipeline".to_string())?;
 
-    let text_sink = make_text_sink()?;
-    pipeline.set_property("text-sink", text_sink.upcast_ref::<gst::Element>());
+    // Leave text-sink unset so playbin inserts subtitleoverlay, which autoplugs
+    // assrender (libass) for application/x-ass and SSA tracks.
     if let Some(sidecar) = sidecar {
         pipeline.set_property("suburi", sidecar.as_str());
     }
@@ -64,10 +53,8 @@ pub fn open(
 
     let mut subtitles = SubtitleSession {
         pipeline,
-        text_sink,
         tracks: Vec::new(),
         current: None,
-        cues: Mutex::new(VecDeque::new()),
     };
     subtitles.refresh_tracks();
     Ok(OpenedMedia { video, subtitles })
@@ -116,14 +103,23 @@ impl SubtitleSession {
 
     pub fn set_current(&mut self, index: Option<i32>) {
         self.current = index;
-        // Do not set current-text to -1. playbin then either reports n-text=0
-        // or clamps back to the last stream, so cycling cannot leave Off.
-        if let Some(index) = index {
-            self.pipeline.set_property("current-text", index);
+        match index {
+            Some(index) => {
+                set_play_flag_text(&self.pipeline, true);
+                self.pipeline.set_property("current-text", index);
+                set_overlay_visible(&self.pipeline, true);
+            }
+            None => {
+                set_overlay_visible(&self.pipeline, false);
+                self.pipeline.set_property("current-text", -1i32);
+                set_play_flag_text(&self.pipeline, false);
+            }
         }
-        if let Ok(mut cues) = self.cues.lock() {
-            cues.clear();
-        }
+    }
+
+    pub fn apply_font_size(&self, size: f32) {
+        let desc = format!("Sans {}", size.round().clamp(10.0, 48.0) as i32);
+        self.pipeline.set_property("subtitle-font-desc", desc);
     }
 
     pub fn cycle(&mut self) -> String {
@@ -152,57 +148,6 @@ impl SubtitleSession {
             self.set_current(Some(last.index));
         }
     }
-
-    pub fn cue_at(&self, position: Duration) -> Option<String> {
-        if self.current.is_none() {
-            return None;
-        }
-        self.drain_samples();
-        let Ok(mut cues) = self.cues.lock() else {
-            return None;
-        };
-        while cues
-            .front()
-            .is_some_and(|cue| cue.end + Duration::from_millis(80) < position)
-        {
-            cues.pop_front();
-        }
-        cues.iter()
-            .rev()
-            .find(|cue| position >= cue.start && position <= cue.end)
-            .map(|cue| cue.text.clone())
-    }
-
-    fn drain_samples(&self) {
-        let Ok(mut cues) = self.cues.lock() else {
-            return;
-        };
-        while let Some(sample) = self.text_sink.try_pull_sample(gst::ClockTime::ZERO) {
-            if let Some(cue) = cue_from_sample(&sample) {
-                cues.push_back(cue);
-                while cues.len() > 24 {
-                    cues.pop_front();
-                }
-            }
-        }
-    }
-}
-
-fn make_text_sink() -> Result<gst_app::AppSink, String> {
-    let element = gst::ElementFactory::make("appsink")
-        .name("gpp_text")
-        .property("drop", true)
-        .property("max-buffers", 32u32)
-        .property("enable-last-sample", false)
-        .property("sync", false)
-        .property("emit-signals", false)
-        .build()
-        .map_err(|err| err.to_string())?;
-    let sink = element
-        .downcast::<gst_app::AppSink>()
-        .map_err(|_| "failed to create subtitle appsink".to_string())?;
-    sink.set_caps(Some(&gst::Caps::builder("text/x-raw").build()));
-    Ok(sink)
 }
 
 fn video_appsink(pipeline: &gst::Pipeline) -> Result<gst_app::AppSink, String> {
@@ -226,6 +171,46 @@ fn video_appsink(pipeline: &gst::Pipeline) -> Result<gst_app::AppSink, String> {
         .downcast::<gst_app::AppSink>()
         .map_err(|_| "gpui_video is not an appsink".to_string())?;
     Ok(sink)
+}
+
+fn set_play_flag_text(pipeline: &gst::Pipeline, enabled: bool) {
+    let value = pipeline.property_value("flags");
+    let Some(class) = FlagsClass::with_type(value.type_()) else {
+        return;
+    };
+    let Some(builder) = class.builder_with_value(value) else {
+        return;
+    };
+    let builder = if enabled {
+        builder.set_by_nick("text")
+    } else {
+        builder.unset_by_nick("text")
+    };
+    if let Some(value) = builder.build() {
+        pipeline.set_property("flags", value);
+    }
+}
+
+fn set_overlay_visible(pipeline: &gst::Pipeline, visible: bool) {
+    let mut iter = pipeline.iterate_recurse();
+    loop {
+        match iter.next() {
+            Ok(Some(element)) => {
+                let factory = element
+                    .factory()
+                    .map(|factory| factory.name().as_str().to_string())
+                    .unwrap_or_default();
+                match factory.as_str() {
+                    "subtitleoverlay" => element.set_property("silent", !visible),
+                    "assrender" => element.set_property("enable", visible),
+                    _ => {}
+                }
+            }
+            Ok(None) => break,
+            Err(gst::IteratorError::Resync) => iter.resync(),
+            Err(_) => break,
+        }
+    }
 }
 
 fn track_label(pipeline: &gst::Pipeline, index: i32) -> String {
@@ -268,25 +253,7 @@ fn language_name(code: &str) -> String {
     }
 }
 
-fn cue_from_sample(sample: &gst::Sample) -> Option<Cue> {
-    let buffer = sample.buffer()?;
-    let pts = buffer.pts()?;
-    let duration = buffer
-        .duration()
-        .unwrap_or(gst::ClockTime::from_mseconds(3500));
-    let map = buffer.map_readable().ok()?;
-    let raw = std::str::from_utf8(map.as_slice()).ok()?;
-    let text = clean_subtitle_text(raw);
-    if text.is_empty() {
-        return None;
-    }
-    Some(Cue {
-        start: Duration::from_nanos(pts.nseconds()),
-        end: Duration::from_nanos(pts.nseconds().saturating_add(duration.nseconds())),
-        text,
-    })
-}
-
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn clean_subtitle_text(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();

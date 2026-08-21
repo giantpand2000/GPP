@@ -9,7 +9,7 @@ GPU-accelerated video player written in Rust, using [GPUI](https://www.gpui.rs/)
 - YouTube-style overlay: SVG icons, red progress bar, hover-to-scrub knob, expanding volume slider
 - Play / pause, skip 5s, volume, mute, loop, playback speed
 - Playlist next
-- Embedded and sidecar subtitle tracks (SRT / ASS / VTT), cycled with `C` or the CC button
+- Embedded and sidecar subtitle tracks (SRT / ASS / VTT), rendered with libass via GStreamer `assrender`, cycled with `C` or the CC button
 - Fullscreen
 - Auto-hiding controls while a video is playing
 - Global settings overlay for autoplay, volume, speed, and subtitle defaults
