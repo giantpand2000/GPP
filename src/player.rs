@@ -24,7 +24,8 @@ const HIDE_CONTROLS_AFTER: Duration = Duration::from_millis(2200);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DragTarget {
-    Seek,
+    SeekTrack,
+    SeekKnob,
     Volume,
 }
 
@@ -365,7 +366,11 @@ impl Player {
         if duration.is_zero() {
             return;
         }
-        let target = Duration::from_secs_f64(duration.as_secs_f64() * ratio.clamp(0.0, 1.0) as f64);
+        let mut target =
+            Duration::from_secs_f64(duration.as_secs_f64() * ratio.clamp(0.0, 1.0) as f64);
+        if duration > Duration::from_millis(1) {
+            target = target.min(duration - Duration::from_millis(1));
+        }
         if let Err(err) = video.seek(target, accurate) {
             log::warn!("seek failed: {err}");
         }
@@ -580,14 +585,39 @@ impl Player {
         cx.notify();
     }
 
-    fn ratio_at(bounds: Bounds<Pixels>, x: Pixels) -> f32 {
+    fn is_seeking(&self) -> bool {
+        matches!(
+            self.dragging,
+            Some(DragTarget::SeekTrack | DragTarget::SeekKnob)
+        )
+    }
+
+    fn ratio_along(bounds: Bounds<Pixels>, x: Pixels) -> f32 {
         let width = f32::from(bounds.size.width).max(1.0);
-        ((f32::from(x) - f32::from(bounds.origin.x)) / width).clamp(0.0, 1.0)
+        (f32::from(x) - f32::from(bounds.origin.x)) / width
+    }
+
+    fn ratio_at(bounds: Bounds<Pixels>, x: Pixels) -> f32 {
+        Self::ratio_along(bounds, x).clamp(0.0, 1.0)
+    }
+
+    fn is_on_knob(&self, position: Point<Pixels>) -> bool {
+        let bounds = self.seek_bounds;
+        if self.video.is_none() || bounds.size.width <= px(1.) {
+            return false;
+        }
+        let progress = self.playback_progress();
+        let center_x = f32::from(bounds.origin.x) + progress * f32::from(bounds.size.width);
+        let x = f32::from(position.x);
+        let y = f32::from(position.y);
+        let top = f32::from(bounds.origin.y) - 4.0;
+        let bottom = f32::from(bounds.origin.y) + f32::from(bounds.size.height) + 4.0;
+        (x - center_x).abs() <= 14.0 && y >= top && y <= bottom
     }
 
     fn hover_seek_ratio(&self, window: &Window) -> Option<f32> {
-        if self.dragging == Some(DragTarget::Seek) {
-            return self.scrub;
+        if self.is_seeking() {
+            return self.scrub.map(|ratio| ratio.clamp(0.0, 1.0));
         }
         if self.video.is_none() {
             return None;
@@ -604,7 +634,7 @@ impl Player {
     }
 
     fn update_hover_seek(&mut self, position: Point<Pixels>) {
-        if self.dragging == Some(DragTarget::Seek) {
+        if self.is_seeking() {
             return;
         }
         self.hover_seek = if self.video.is_some() && self.seek_bounds.contains(&position) {
@@ -614,15 +644,18 @@ impl Player {
         };
     }
 
+    fn scrub_to(&mut self, x: Pixels, cx: &mut Context<Self>) {
+        let ratio = Self::ratio_along(self.seek_bounds, x);
+        self.scrub = Some(ratio);
+        self.hover_seek = Some(ratio.clamp(0.0, 1.0));
+        cx.notify();
+    }
+
     fn on_pointer_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         self.bump_interaction();
         match self.dragging {
-            Some(DragTarget::Seek) => {
-                let ratio = Self::ratio_at(self.seek_bounds, event.position.x);
-                self.scrub = Some(ratio);
-                self.hover_seek = Some(ratio);
-                cx.notify();
-            }
+            Some(DragTarget::SeekKnob) => self.scrub_to(event.position.x, cx),
+            Some(DragTarget::SeekTrack) => cx.notify(),
             Some(DragTarget::Volume) => {
                 self.set_volume(
                     Self::ratio_at(self.volume_bounds, event.position.x) as f64,
@@ -638,12 +671,17 @@ impl Player {
 
     fn finish_drag(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         match self.dragging.take() {
-            Some(DragTarget::Seek) => {
+            Some(DragTarget::SeekKnob) => {
                 let ratio = self
                     .scrub
-                    .unwrap_or_else(|| Self::ratio_at(self.seek_bounds, position.x));
+                    .unwrap_or_else(|| Self::ratio_along(self.seek_bounds, position.x))
+                    .clamp(0.0, 1.0);
                 self.scrub = None;
                 self.seek_ratio(ratio, false, cx);
+            }
+            Some(DragTarget::SeekTrack) => {
+                self.scrub = None;
+                cx.notify();
             }
             Some(DragTarget::Volume) => {
                 self.set_volume(Self::ratio_at(self.volume_bounds, position.x) as f64, cx);
@@ -657,11 +695,18 @@ impl Player {
             return;
         }
         self.bump_interaction();
-        self.dragging = Some(DragTarget::Seek);
-        let ratio = Self::ratio_at(self.seek_bounds, event.position.x);
-        self.scrub = Some(ratio);
-        self.hover_seek = Some(ratio);
-        self.seek_ratio(ratio, false, cx);
+        if self.is_on_knob(event.position) {
+            self.dragging = Some(DragTarget::SeekKnob);
+            let current = self.playback_progress();
+            self.scrub = Some(current);
+            self.hover_seek = Some(current);
+        } else {
+            self.dragging = Some(DragTarget::SeekTrack);
+            let ratio = Self::ratio_at(self.seek_bounds, event.position.x);
+            self.scrub = Some(ratio);
+            self.hover_seek = Some(ratio);
+            self.seek_ratio(ratio, false, cx);
+        }
         cx.stop_propagation();
     }
 
@@ -697,7 +742,7 @@ impl Player {
         }
     }
 
-    fn playback_progress(&self) -> f32 {
+    fn playhead_ratio(&self) -> f32 {
         if let Some(ratio) = self.scrub {
             return ratio;
         }
@@ -708,13 +753,19 @@ impl Player {
         if duration <= 0.0 {
             0.0
         } else {
-            (video.position().as_secs_f64() / duration).clamp(0.0, 1.0) as f32
+            (video.position().as_secs_f64() / duration) as f32
         }
+    }
+
+    fn playback_progress(&self) -> f32 {
+        self.playhead_ratio().clamp(0.0, 1.0)
     }
 
     fn displayed_position(&self) -> Duration {
         if let (Some(ratio), Some(video)) = (self.scrub, self.video.as_ref()) {
-            Duration::from_secs_f64(video.duration().as_secs_f64() * ratio as f64)
+            Duration::from_secs_f64(
+                video.duration().as_secs_f64() * ratio.clamp(0.0, 1.0) as f64,
+            )
         } else {
             self.video
                 .as_ref()
@@ -925,6 +976,17 @@ impl Player {
             .drag_over::<ExternalPaths>(|style, _, _, _| {
                 style.border_2().border_color(theme::progress())
             })
+            .on_mouse_move(cx.listener(|this, event, _, cx| {
+                if this.dragging.is_some() {
+                    this.on_pointer_move(event, cx);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                    this.finish_drag(event.position, cx)
+                }),
+            )
     }
 
     fn can_drop_files(value: &dyn std::any::Any) -> bool {
@@ -1661,10 +1723,11 @@ impl Player {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let scrubbing = self.dragging == Some(DragTarget::Seek);
+        let scrubbing = self.is_seeking();
         let hover_ratio = self.hover_seek_ratio(window);
         let hovering = hover_ratio.is_some() || scrubbing;
         let knob_size = px(13.);
+        let knob_ratio = self.playhead_ratio();
         let duration = self
             .video
             .as_ref()
@@ -1694,17 +1757,25 @@ impl Player {
             .flex_col()
             .justify_center()
             .occlude()
-            .cursor(CursorStyle::PointingHand)
+            .cursor(if matches!(self.dragging, Some(DragTarget::SeekKnob)) {
+                CursorStyle::ClosedHand
+            } else {
+                CursorStyle::PointingHand
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event, _, cx| this.begin_seek(event, cx)),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                this.update_hover_seek(event.position);
-                cx.notify();
+                if this.dragging == Some(DragTarget::SeekKnob) {
+                    this.scrub_to(event.position.x, cx);
+                } else {
+                    this.update_hover_seek(event.position);
+                    cx.notify();
+                }
             }))
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                if !*hovered && this.dragging != Some(DragTarget::Seek) {
+                if !*hovered && !this.is_seeking() {
                     this.hover_seek = None;
                     cx.notify();
                 }
@@ -1771,17 +1842,13 @@ impl Player {
                                 div()
                                     .absolute()
                                     .top(px(if hovering { -4. } else { -5. }))
-                                    .flex()
-                                    .w_full()
-                                    .child(div().w(gpui::relative(progress)))
-                                    .child(
-                                        div()
-                                            .ml(px(-6.5))
-                                            .size(knob_size)
-                                            .rounded_full()
-                                            .bg(theme::progress())
-                                            .opacity(if hovering { 1. } else { 0. }),
-                                    ),
+                                    .left(px(
+                                        knob_ratio * f32::from(self.seek_bounds.size.width) - 6.5,
+                                    ))
+                                    .size(knob_size)
+                                    .rounded_full()
+                                    .bg(theme::progress())
+                                    .opacity(if hovering { 1. } else { 0. }),
                             ),
                     ),
             )
