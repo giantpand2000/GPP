@@ -96,6 +96,21 @@ jobs:
       - name: Build app bundle and zip
         run: ./scripts/package-macos.sh --zip
 
+      - name: Verify self-contained app
+        run: |
+          executable="dist/GPP.app/Contents/MacOS/gpp"
+          framework="dist/GPP.app/Contents/Frameworks/GStreamer.framework/Versions/1.0"
+          test -x "$framework/libexec/gstreamer-1.0/gst-plugin-scanner"
+          test -f "$framework/lib/gstreamer-1.0/libgstplayback.dylib"
+          otool -l "$executable" | grep -F \
+            'path @executable_path/../Frameworks/GStreamer.framework/Versions/1.0 '
+          if otool -l "$executable" | grep -F '/Library/Frameworks/GStreamer.framework'; then
+            echo "system GStreamer rpath leaked into release app" >&2
+            exit 1
+          fi
+          file "$executable" | grep -F "${{ matrix.arch }}"
+          codesign --verify --deep --strict "dist/GPP.app"
+
       - name: Upload app archive
         uses: actions/upload-artifact@v7
         with:

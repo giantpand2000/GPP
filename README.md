@@ -61,11 +61,8 @@ sudo dnf install gstreamer1-devel gstreamer1-plugins-base-devel \
 Download the macOS zip from the repository's Releases page, extract it, and move
 `GPP.app` to `Applications`. The published app is ad-hoc signed rather than Apple
 notarized, so macOS may require you to control-click the app and choose **Open**
-the first time.
-
-Install the official GStreamer runtime from
-[gstreamer.freedesktop.org](https://gstreamer.freedesktop.org/download/#macos)
-before launching GPP. The runtime is shared and is not embedded in the app zip.
+the first time. Release archives include a private GStreamer runtime, so users do
+not need to install GStreamer separately.
 
 ## Run from source
 
@@ -87,16 +84,22 @@ open dist/GPP.app
 This builds `dist/GPP.app` and a versioned
 `dist/GPP-<version>-macOS-<architecture>.zip`, compiles `assets/app-icon.png`
 into `AppIcon.icns`, and registers the playable video extensions (mp4, mkv,
-webm, mov, and the rest of the list in `src/util.rs`). GPP uses the shared
-GStreamer runtime at `/Library/Frameworks/GStreamer.framework`. A matching
-`.sha256` checksum is generated beside the archive.
+webm, mov, and the rest of the list in `src/util.rs`). The packager copies the
+official GStreamer framework into the app and thins its Mach-O files to the host
+architecture. A matching `.sha256` checksum is generated beside the archive.
+
+The official GStreamer framework is required on the build machine. Set
+`GSTREAMER_FRAMEWORK=/path/to/GStreamer.framework` to package a framework from
+a non-default location. Third-party notices and the applicable GNU license texts
+are included in `GPP.app/Contents/Resources`.
 
 ## Continuous integration and releases
 
 GitHub Actions checks formatting, runs Clippy and the test suite, builds the
-macOS app for Apple Silicon and Intel, and uploads both zips on pushes and pull
-requests. Pushing a tag that matches the Cargo version (for example, `v0.1.0`)
-also publishes those archives as a GitHub Release. See
+macOS app for Apple Silicon and Intel, verifies that each app is self-contained,
+and uploads both zips on pushes and pull requests. Pushing a tag that matches the
+Cargo version (for example, `v0.1.0`) also publishes those archives as a GitHub
+Release. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the release checklist.
 
 ## Keyboard

@@ -22,9 +22,12 @@ Keep pull requests focused and include tests for behavior changes where practica
 ```
 
 The archive is written to `dist/GPP-<version>-macOS-<architecture>.zip`. The
-matching `.sha256` file can be used to verify it. The bundle is ad-hoc signed;
-official distribution signing and notarization require an Apple Developer
-certificate and are not performed by the public CI workflow.
+matching `.sha256` file can be used to verify it. Packaging requires the official
+GStreamer framework and embeds an architecture-specific copy inside the app; use
+`GSTREAMER_FRAMEWORK=/path/to/GStreamer.framework` when it is not installed at
+the default system path. The bundle is ad-hoc signed; official distribution
+signing and notarization require an Apple Developer certificate and are not
+performed by the public CI workflow.
 
 ## Publishing a release
 

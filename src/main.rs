@@ -207,19 +207,42 @@ fn app_menus() -> Vec<Menu> {
 fn configure_gstreamer() {
     #[cfg(target_os = "macos")]
     {
-        let root = PathBuf::from("/Library/Frameworks/GStreamer.framework/Versions/1.0");
-        if !root.exists() {
+        let Some(root) = macos_gstreamer_root() else {
             return;
-        }
+        };
         let plugin_path = root.join("lib/gstreamer-1.0");
         let scanner = root.join("libexec/gstreamer-1.0/gst-plugin-scanner");
+        let gio_modules = root.join("lib/gio/modules");
+        let fontconfig = root.join("etc/fonts");
+        let data = root.join("share");
+        let config = root.join("etc/xdg");
         // SAFETY: called from main() before any other threads start.
         unsafe {
             if std::env::var_os("GST_PLUGIN_SYSTEM_PATH").is_none() {
                 std::env::set_var("GST_PLUGIN_SYSTEM_PATH", &plugin_path);
             }
-            if std::env::var_os("GST_PLUGIN_SCANNER").is_none() && scanner.exists() {
-                std::env::set_var("GST_PLUGIN_SCANNER", scanner);
+            if std::env::var_os("GST_PLUGIN_SYSTEM_PATH_1_0").is_none() {
+                std::env::set_var("GST_PLUGIN_SYSTEM_PATH_1_0", &plugin_path);
+            }
+            if scanner.exists() {
+                if std::env::var_os("GST_PLUGIN_SCANNER").is_none() {
+                    std::env::set_var("GST_PLUGIN_SCANNER", &scanner);
+                }
+                if std::env::var_os("GST_PLUGIN_SCANNER_1_0").is_none() {
+                    std::env::set_var("GST_PLUGIN_SCANNER_1_0", &scanner);
+                }
+            }
+            if gio_modules.exists() && std::env::var_os("GIO_EXTRA_MODULES").is_none() {
+                std::env::set_var("GIO_EXTRA_MODULES", gio_modules);
+            }
+            if fontconfig.exists() && std::env::var_os("FONTCONFIG_PATH").is_none() {
+                std::env::set_var("FONTCONFIG_PATH", fontconfig);
+            }
+            if data.exists() && std::env::var_os("XDG_DATA_DIRS").is_none() {
+                std::env::set_var("XDG_DATA_DIRS", data);
+            }
+            if config.exists() && std::env::var_os("XDG_CONFIG_DIRS").is_none() {
+                std::env::set_var("XDG_CONFIG_DIRS", config);
             }
             if std::env::var_os("GST_REGISTRY_1_0").is_none() {
                 if let Some(cache) = dirs_cache() {
@@ -229,6 +252,19 @@ fn configure_gstreamer() {
             }
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_gstreamer_root() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let contents = executable.parent()?.parent()?;
+    let bundled = contents.join("Frameworks/GStreamer.framework/Versions/1.0");
+    if bundled.is_dir() {
+        return Some(bundled);
+    }
+
+    let system = PathBuf::from("/Library/Frameworks/GStreamer.framework/Versions/1.0");
+    system.is_dir().then_some(system)
 }
 
 #[cfg(target_os = "macos")]
