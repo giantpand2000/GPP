@@ -362,11 +362,8 @@ impl Player {
                         });
                         this.status = Status::Ready;
                         this.error = None;
-                        this.clock.capture(
-                            Duration::ZERO,
-                            this.settings.autoplay,
-                            this.speed,
-                        );
+                        this.clock
+                            .capture(Duration::ZERO, this.settings.autoplay, this.speed);
                     }
                     Err(err) => {
                         this.video = None;
@@ -862,9 +859,8 @@ impl Player {
 
         if let Some(ratio) = self.scrub {
             let duration = video.duration();
-            let media = Duration::from_secs_f64(
-                duration.as_secs_f64() * ratio.clamp(0.0, 1.0) as f64,
-            );
+            let media =
+                Duration::from_secs_f64(duration.as_secs_f64() * ratio.clamp(0.0, 1.0) as f64);
             self.clock.capture(media, false, speed);
             return;
         }
@@ -1114,17 +1110,15 @@ impl Player {
     }
 
     fn can_drop_files(value: &dyn std::any::Any) -> bool {
-        value
-            .downcast_ref::<ExternalPaths>()
-            .is_some_and(|paths| {
-                paths.paths().iter().any(|path| {
-                    is_video_path(path)
-                        || is_subtitle_path(path)
-                        || danmaku::is_danmaku_path(path)
-                        || path.is_dir()
-                        || path.is_file()
-                })
+        value.downcast_ref::<ExternalPaths>().is_some_and(|paths| {
+            paths.paths().iter().any(|path| {
+                is_video_path(path)
+                    || is_subtitle_path(path)
+                    || danmaku::is_danmaku_path(path)
+                    || path.is_dir()
+                    || path.is_file()
             })
+        })
     }
 
     fn render_danmaku_layer(&self) -> impl IntoElement {
@@ -1967,7 +1961,7 @@ impl Player {
                                     .absolute()
                                     .top(px(if hovering { -4. } else { -5. }))
                                     .left(px(
-                                        knob_ratio * f32::from(self.seek_bounds.size.width) - 6.5,
+                                        knob_ratio * f32::from(self.seek_bounds.size.width) - 6.5
                                     ))
                                     .size(knob_size)
                                     .rounded_full()

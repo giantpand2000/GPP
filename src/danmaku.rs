@@ -865,7 +865,13 @@ mod tests {
             ..Settings::default()
         };
         let early = layout(&session, Duration::from_secs(1), 800.0, 400.0, &settings);
-        let late = layout(&session, Duration::from_millis(10_100), 800.0, 400.0, &settings);
+        let late = layout(
+            &session,
+            Duration::from_millis(10_100),
+            800.0,
+            400.0,
+            &settings,
+        );
         let y_early = early
             .iter()
             .find(|item| item.text.as_ref() == "marker")

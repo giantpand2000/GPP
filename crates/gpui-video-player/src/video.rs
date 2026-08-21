@@ -568,11 +568,9 @@ impl Video {
                             }
                         }
                         MessageView::AsyncDone(_) => {
-                            if let Err(err) = issue_latest_seek(
-                                &pipeline_ref,
-                                &seeking_ref,
-                                &pending_seek_ref,
-                            ) {
+                            if let Err(err) =
+                                issue_latest_seek(&pipeline_ref, &seeking_ref, &pending_seek_ref)
+                            {
                                 log::warn!("pending seek failed: {err}");
                                 if !is_paused_ref.load(Ordering::SeqCst) {
                                     let _ = pipeline_ref.set_state(gst::State::Playing);

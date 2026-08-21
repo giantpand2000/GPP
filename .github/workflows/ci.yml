@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  GSTREAMER_VERSION: 1.28.6
+
+jobs:
+  build:
+    name: Test and package (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+            lint: true
+          - runner: macos-15-intel
+            arch: x86_64
+            lint: false
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+
+      - name: Ensure Metal compiler is available
+        run: |
+          if ! xcrun metal --version; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun metal --version
+
+      - name: Cache Cargo files
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-
+
+      - name: Install GStreamer runtime
+        env:
+          GSTREAMER_PACKAGE: gstreamer-1.0-${{ env.GSTREAMER_VERSION }}-universal.pkg
+        run: |
+          curl --fail --location --remote-name \
+            "https://gstreamer.freedesktop.org/data/pkg/osx/${GSTREAMER_VERSION}/${GSTREAMER_PACKAGE}"
+          curl --fail --location --remote-name \
+            "https://gstreamer.freedesktop.org/data/pkg/osx/${GSTREAMER_VERSION}/${GSTREAMER_PACKAGE}.sha256sum"
+          shasum -a 256 --check "${GSTREAMER_PACKAGE}.sha256sum"
+          sudo installer -pkg "$GSTREAMER_PACKAGE" -target /
+
+      - name: Check formatting
+        if: matrix.lint
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        if: matrix.lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Run tests
+        run: cargo test --all-targets --locked
+
+      - name: Verify release tag matches Cargo version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          test "$GITHUB_REF_NAME" = "v$version" || {
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
+            exit 1
+          }
+
+      - name: Build app bundle and zip
+        run: ./scripts/package-macos.sh --zip
+
+      - name: Upload app archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: gpp-macos-${{ matrix.arch }}
+          path: |
+            dist/GPP-*-macOS-*.zip
+            dist/GPP-*-macOS-*.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download app archive
+        uses: actions/download-artifact@v8
+        with:
+          pattern: gpp-macos-*
+          path: release
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/*.zip release/*.sha256 \
+            --verify-tag \
+            --generate-notes \
+            --title "GPP $GITHUB_REF_NAME"
