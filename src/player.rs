@@ -951,21 +951,39 @@ impl Player {
             .overflow_hidden()
             .when_some(items, |this, items| {
                 this.children(items.into_iter().map(|item| {
+                    // Glyph copies, not box-shadow.
+                    let text = item.text.clone();
+                    let stroke = gpui::hsla(0., 0., 0., 0.22);
                     div()
+                        .id(("danmaku", item.id))
                         .absolute()
                         .left(px(item.x))
                         .top(px(item.y))
+                        .w(px(item.width))
+                        .flex_none()
+                        .line_height(px(item.font_size))
                         .text_size(px(item.font_size))
                         .font_weight(FontWeight::MEDIUM)
-                        .flex_none()
-                        .text_color(item.color)
                         .whitespace_nowrap()
-                        .shadow(vec![gpui::BoxShadow {
-                            color: gpui::rgba(0x00000066).into(),
-                            offset: gpui::point(px(1.), px(1.)),
-                            blur_radius: px(0.),
-                            spread_radius: px(0.),
-                        }])
+                        .text_color(item.color)
+                        .children(
+                            [
+                                (px(1.), px(0.)),
+                                (px(-1.), px(0.)),
+                                (px(0.), px(1.)),
+                                (px(0.), px(-1.)),
+                            ]
+                            .into_iter()
+                            .map(move |(dx, dy)| {
+                                div()
+                                    .absolute()
+                                    .left(dx)
+                                    .top(dy)
+                                    .whitespace_nowrap()
+                                    .text_color(stroke)
+                                    .child(text.clone())
+                            }),
+                        )
                         .child(item.text)
                 }))
             })
