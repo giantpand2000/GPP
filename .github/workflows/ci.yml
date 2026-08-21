@@ -73,6 +73,13 @@ jobs:
           shasum -a 256 --check "${GSTREAMER_PACKAGE}.sha256sum"
           sudo installer -pkg "$GSTREAMER_PACKAGE" -target /
 
+      - name: Verify GStreamer development metadata
+        run: |
+          test -d /Library/Frameworks/GStreamer.framework/Versions/1.0
+          ./pkgconfig/pkg-config.sh --modversion gstreamer-1.0
+          ./pkgconfig/pkg-config.sh --libs --cflags \
+            gstreamer-video-1.0 gstreamer-app-1.0
+
       - name: Check formatting
         if: matrix.lint
         run: cargo fmt --all -- --check
