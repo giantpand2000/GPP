@@ -1,5 +1,6 @@
 mod actions;
 mod assets;
+mod danmaku;
 mod icon;
 mod player;
 mod settings;
@@ -151,6 +152,7 @@ fn keybindings() -> Vec<KeyBinding> {
         KeyBinding::new(fullscreen, ToggleFullscreen, None),
         KeyBinding::new("s", CycleSpeed, None),
         KeyBinding::new("c", CycleSubtitles, None),
+        KeyBinding::new("d", ToggleDanmaku, None),
         KeyBinding::new("n", NextTrack, None),
         KeyBinding::new("p", PrevTrack, None),
         KeyBinding::new("home", Restart, None),
@@ -195,6 +197,7 @@ fn app_menus() -> Vec<Menu> {
                 MenuItem::action("Loop", ToggleLoop),
                 MenuItem::action("Cycle Speed", CycleSpeed),
                 MenuItem::action("Cycle Subtitles", CycleSubtitles),
+                MenuItem::action("Toggle Danmaku", ToggleDanmaku),
                 MenuItem::action("Fullscreen", ToggleFullscreen),
             ],
         },

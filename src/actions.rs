@@ -19,6 +19,7 @@ actions!(
         ToggleSettings,
         CycleSpeed,
         CycleSubtitles,
+        ToggleDanmaku,
         NextTrack,
         PrevTrack,
         Restart,

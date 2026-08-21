@@ -52,6 +52,10 @@ pub fn toggle_off() -> Hsla {
     rgba(0xFFFFFF38).into()
 }
 
+pub fn settings_rule() -> Hsla {
+    rgba(0xFFFFFF14).into()
+}
+
 pub fn bottom_gradient() -> gpui::Background {
     linear_gradient(
         180.,

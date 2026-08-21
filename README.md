@@ -10,6 +10,7 @@ GPU-accelerated video player written in Rust, using [GPUI](https://www.gpui.rs/)
 - Play / pause, skip 5s, volume, mute, loop, playback speed
 - Playlist next
 - Embedded and sidecar subtitle tracks (SRT / ASS / VTT), rendered with libass via GStreamer `assrender`, cycled with `C` or the CC button
+- Danmaku (Bilibili XML / JSON) drawn with system text so emoji works, sitting above the video but below GPUI toasts and out of the subtitle band; toggle with `D`
 - Fullscreen
 - Auto-hiding controls while a video is playing
 - Global settings overlay for autoplay, volume, speed, and subtitle defaults
@@ -78,6 +79,8 @@ This builds `dist/GPP.app`, compiles `assets/app-icon.png` into `AppIcon.icns`, 
 | M | Mute |
 | R | Loop |
 | S | Cycle speed |
+| C | Cycle subtitles |
+| D | Toggle danmaku |
 | F | Fullscreen |
 | N / P | Next / previous |
 | Home / 0 | Restart |

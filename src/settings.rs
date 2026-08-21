@@ -1,6 +1,6 @@
 use gpui::{
-    App, ClickEvent, CursorStyle, Div, IntoElement, SharedString, Stateful, Window, div,
-    prelude::*, px,
+    App, ClickEvent, CursorStyle, Div, FontWeight, IntoElement, SharedString, Stateful, Window,
+    div, prelude::*, px,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -10,6 +10,18 @@ use crate::theme;
 
 pub const SUBTITLE_SIZES: &[f32] = &[14.0, 18.0, 22.0, 28.0];
 pub const VOLUME_PRESETS: &[f64] = &[0.0, 0.25, 0.5, 0.75, 1.0];
+pub const DANMAKU_SIZES: &[f32] = &[16.0, 20.0, 24.0, 28.0];
+pub const DANMAKU_OPACITY: &[f32] = &[0.5, 0.75, 1.0];
+pub const DANMAKU_SPEED: &[f32] = &[0.7, 1.0, 1.4];
+pub const DANMAKU_DENSITY: &[f32] = &[0.4, 0.7, 1.0];
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SettingsTab {
+    #[default]
+    Playback,
+    Subtitles,
+    Danmaku,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -23,6 +35,12 @@ pub struct Settings {
     pub subtitle_enabled: bool,
     pub subtitle_background: bool,
     pub subtitle_size: f32,
+    pub danmaku_enabled: bool,
+    pub danmaku_avoid_subtitles: bool,
+    pub danmaku_opacity: f32,
+    pub danmaku_speed: f32,
+    pub danmaku_font_size: f32,
+    pub danmaku_density: f32,
 }
 
 impl Default for Settings {
@@ -37,6 +55,12 @@ impl Default for Settings {
             subtitle_enabled: true,
             subtitle_background: true,
             subtitle_size: 18.0,
+            danmaku_enabled: true,
+            danmaku_avoid_subtitles: true,
+            danmaku_opacity: 0.75,
+            danmaku_speed: 1.0,
+            danmaku_font_size: 20.0,
+            danmaku_density: 0.7,
         }
     }
 }
@@ -75,6 +99,20 @@ impl Settings {
         };
         self.subtitle_size = SUBTITLE_SIZES[next];
     }
+
+    pub fn cycle_choice(values: &[f32], current: f32, larger: bool) -> f32 {
+        let Some(index) = values
+            .iter()
+            .position(|value| (*value - current).abs() < 0.05)
+        else {
+            return values[values.len() / 2];
+        };
+        if larger {
+            values[(index + 1).min(values.len() - 1)]
+        } else {
+            values[index.saturating_sub(1)]
+        }
+    }
 }
 
 fn settings_path() -> PathBuf {
@@ -109,6 +147,54 @@ pub fn setting_row(label: &'static str, control: impl IntoElement) -> impl IntoE
         .justify_between()
         .child(div().text_sm().text_color(theme::white()).child(label))
         .child(control)
+}
+
+pub fn tab_button(
+    id: &'static str,
+    label: &'static str,
+    active: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex_1()
+        .h(px(44.))
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .cursor(CursorStyle::PointingHand)
+        .when(!active, |this| {
+            this.hover(|style| style.text_color(theme::white()))
+        })
+        .on_click(on_click)
+        .child(
+            div()
+                .text_sm()
+                .font_weight(if active {
+                    FontWeight::MEDIUM
+                } else {
+                    FontWeight::NORMAL
+                })
+                .text_color(if active {
+                    theme::white()
+                } else {
+                    theme::muted()
+                })
+                .child(label),
+        )
+        .child(
+            div()
+                .mt_1()
+                .h(px(2.))
+                .w(px(36.))
+                .rounded_full()
+                .bg(if active {
+                    theme::progress()
+                } else {
+                    gpui::transparent_black()
+                }),
+        )
 }
 
 pub fn toggle(

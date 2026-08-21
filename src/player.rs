@@ -1,4 +1,5 @@
 use crate::actions::*;
+use crate::danmaku::{self, DanmakuSession};
 use crate::icon::{self, Icon};
 use crate::settings::{self, Settings};
 use crate::subtitles::{self, SubtitleSession};
@@ -57,8 +58,10 @@ pub struct Player {
     dialog_open: bool,
     subtitles: Option<SubtitleSession>,
     subtitle_toast: Option<(SharedString, Instant)>,
+    danmaku: Option<DanmakuSession>,
     settings: Settings,
     settings_open: bool,
+    settings_tab: settings::SettingsTab,
 }
 
 impl Player {
@@ -90,8 +93,10 @@ impl Player {
             dialog_open: false,
             subtitles: None,
             subtitle_toast: None,
+            danmaku: None,
             settings,
             settings_open: false,
+            settings_tab: settings::SettingsTab::Playback,
         };
 
         if let Some(source) = initial {
@@ -224,6 +229,7 @@ impl Player {
         self.error = None;
         self.video = None;
         self.subtitles = None;
+        self.danmaku = None;
         self.subtitle_toast = None;
         self.scrub = None;
         self.load_generation += 1;
@@ -234,6 +240,10 @@ impl Player {
         let muted = self.muted;
         let sidecar = match &source {
             MediaSource::File(path) => subtitles::sidecar_uri(path),
+            MediaSource::Url(_) => None,
+        };
+        let danmaku_path = match &source {
+            MediaSource::File(path) => danmaku::sidecar(path),
             MediaSource::Url(_) => None,
         };
 
@@ -253,9 +263,12 @@ impl Player {
                 },
             )
         });
+        let danmaku_task =
+            cx.background_spawn(async move { danmaku_path.map(|path| danmaku::load(&path)) });
 
         cx.spawn(async move |this, cx| {
             let result = task.await;
+            let danmaku = danmaku_task.await;
             this.update(cx, |this, cx| {
                 if this.load_generation != generation {
                     return;
@@ -279,12 +292,20 @@ impl Player {
                         }
                         this.video = Some(opened.video);
                         this.subtitles = Some(opened.subtitles);
+                        this.danmaku = danmaku.and_then(|result| match result {
+                            Ok(session) => Some(session),
+                            Err(err) => {
+                                log::warn!("danmaku: {err}");
+                                None
+                            }
+                        });
                         this.status = Status::Ready;
                         this.error = None;
                     }
                     Err(err) => {
                         this.video = None;
                         this.subtitles = None;
+                        this.danmaku = None;
                         this.status = Status::Empty;
                         this.error = Some(format!("Failed to open video: {err}"));
                     }
@@ -471,6 +492,11 @@ impl Player {
 
     fn handle_drop(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
         self.bump_interaction();
+        let danmaku = paths
+            .paths()
+            .iter()
+            .find(|path| danmaku::is_danmaku_path(path))
+            .cloned();
         let subtitle = paths
             .paths()
             .iter()
@@ -478,12 +504,35 @@ impl Player {
             .cloned();
         let sources = collect_media(paths.paths().iter().cloned());
         if sources.is_empty() {
-            if let Some(path) = subtitle {
+            if let Some(path) = danmaku {
+                self.load_external_danmaku(path, cx);
+            } else if let Some(path) = subtitle {
                 self.load_external_subtitle(path, cx);
             }
             return;
         }
         self.load_sources(sources, 0, cx);
+    }
+
+    fn load_external_danmaku(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.video.is_none() {
+            self.error = Some("Open a video before dropping a danmaku file".into());
+            cx.notify();
+            return;
+        }
+        match danmaku::load(&path) {
+            Ok(session) => {
+                let label = format!("Danmaku · {}", session.comments.len());
+                self.danmaku = Some(session);
+                self.settings.danmaku_enabled = true;
+                self.settings.save();
+                self.subtitle_toast = Some((label.into(), Instant::now()));
+            }
+            Err(err) => {
+                self.error = Some(err);
+            }
+        }
+        cx.notify();
     }
 
     fn load_external_subtitle(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -511,6 +560,22 @@ impl Player {
             return;
         };
         let label = session.cycle();
+        self.subtitle_toast = Some((label.into(), Instant::now()));
+        cx.notify();
+    }
+
+    fn toggle_danmaku(&mut self, cx: &mut Context<Self>) {
+        self.bump_interaction();
+        self.settings.danmaku_enabled = !self.settings.danmaku_enabled;
+        self.settings.save();
+        let label = if !self.settings.danmaku_enabled {
+            "Danmaku off".into()
+        } else {
+            match &self.danmaku {
+                Some(session) => format!("Danmaku · {}", session.comments.len()),
+                None => "No danmaku file".into(),
+            }
+        };
         self.subtitle_toast = Some((label.into(), Instant::now()));
         cx.notify();
     }
@@ -753,6 +818,7 @@ impl Render for Player {
             .on_action(cx.listener(|this, _: &ToggleSettings, _, cx| this.toggle_settings(cx)))
             .on_action(cx.listener(|this, _: &CycleSpeed, _, cx| this.cycle_speed(cx)))
             .on_action(cx.listener(|this, _: &CycleSubtitles, _, cx| this.cycle_subtitles(cx)))
+            .on_action(cx.listener(|this, _: &ToggleDanmaku, _, cx| this.toggle_danmaku(cx)))
             .on_action(cx.listener(|this, _: &NextTrack, _, cx| this.next_track(cx)))
             .on_action(cx.listener(|this, _: &PrevTrack, _, cx| this.prev_track(cx)))
             .on_action(cx.listener(|this, _: &Restart, _, cx| this.restart(cx)))
@@ -849,6 +915,7 @@ impl Player {
                         .child(video_el(handle).id("frame").buffer_capacity(4)),
                 )
             })
+            .child(self.render_danmaku_layer())
             .when(status == Status::Empty && error.is_none(), |this| {
                 this.child(empty_state(title, cx))
             })
@@ -857,6 +924,49 @@ impl Player {
             })
             .when_some(error, |this, error| {
                 this.child(status_overlay("Couldn't play this file", Some(error)))
+            })
+    }
+
+    fn render_danmaku_layer(&self) -> impl IntoElement {
+        let items = if self.settings.danmaku_enabled {
+            self.danmaku.as_ref().map(|session| {
+                let width = f32::from(self.stage_bounds.size.width).max(1.0);
+                let height = f32::from(self.stage_bounds.size.height).max(1.0);
+                danmaku::layout(
+                    session,
+                    self.displayed_position(),
+                    width,
+                    height,
+                    &self.settings,
+                )
+            })
+        } else {
+            None
+        };
+
+        div()
+            .id("danmaku-layer")
+            .absolute()
+            .inset_0()
+            .overflow_hidden()
+            .when_some(items, |this, items| {
+                this.children(items.into_iter().map(|item| {
+                    div()
+                        .absolute()
+                        .left(px(item.x))
+                        .top(px(item.y))
+                        .text_size(px(item.font_size))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(item.color)
+                        .whitespace_nowrap()
+                        .shadow(vec![gpui::BoxShadow {
+                            color: gpui::rgba(0x00000099).into(),
+                            offset: gpui::point(px(0.), px(1.)),
+                            blur_radius: px(2.),
+                            spread_radius: px(0.),
+                        }])
+                        .child(item.text)
+                }))
             })
     }
 
@@ -887,14 +997,7 @@ impl Player {
     }
 
     fn render_settings_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let autoplay = self.settings.autoplay;
-        let looping = self.settings.loop_playback;
-        let auto_hide = self.settings.auto_hide_controls;
-        let speed = self.settings.speed;
-        let volume = self.settings.volume;
-        let subs_on = self.settings.subtitle_enabled;
-        let subs_bg = self.settings.subtitle_background;
-        let subs_size = self.settings.subtitle_size;
+        let tab = self.settings_tab;
 
         div()
             .id("settings-overlay")
@@ -911,8 +1014,8 @@ impl Player {
             .child(
                 div()
                     .id("settings-panel")
-                    .w(px(420.))
-                    .max_h(px(560.))
+                    .w(px(440.))
+                    .h(px(520.))
                     .rounded_xl()
                     .bg(theme::settings_panel())
                     .flex()
@@ -944,6 +1047,41 @@ impl Player {
                     )
                     .child(
                         div()
+                            .px_3()
+                            .border_b_1()
+                            .border_color(theme::settings_rule())
+                            .flex()
+                            .items_end()
+                            .child(settings::tab_button(
+                                "tab-playback",
+                                "Playback",
+                                tab == settings::SettingsTab::Playback,
+                                cx.listener(|this, _, _, cx| {
+                                    this.settings_tab = settings::SettingsTab::Playback;
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(settings::tab_button(
+                                "tab-subtitles",
+                                "Subtitles",
+                                tab == settings::SettingsTab::Subtitles,
+                                cx.listener(|this, _, _, cx| {
+                                    this.settings_tab = settings::SettingsTab::Subtitles;
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(settings::tab_button(
+                                "tab-danmaku",
+                                "Danmaku",
+                                tab == settings::SettingsTab::Danmaku,
+                                cx.listener(|this, _, _, cx| {
+                                    this.settings_tab = settings::SettingsTab::Danmaku;
+                                    cx.notify();
+                                }),
+                            )),
+                    )
+                    .child(
+                        div()
                             .id("settings-scroll")
                             .flex_1()
                             .px_5()
@@ -951,166 +1089,329 @@ impl Player {
                             .flex()
                             .flex_col()
                             .overflow_y_scroll()
-                            .child(settings::section_label("PLAYBACK"))
-                            .child(settings::setting_row(
-                                "Autoplay",
-                                settings::toggle(
-                                    "set-autoplay",
-                                    autoplay,
-                                    cx.listener(|this, _, _, cx| {
-                                        this.settings.autoplay = !this.settings.autoplay;
-                                        this.settings.save();
-                                        cx.notify();
-                                    }),
-                                ),
-                            ))
-                            .child(settings::setting_row(
-                                "Loop by default",
-                                settings::toggle(
-                                    "set-loop",
-                                    looping,
-                                    cx.listener(|this, _, _, cx| this.toggle_loop(cx)),
-                                ),
-                            ))
-                            .child(settings::setting_row(
-                                "Auto-hide controls",
-                                settings::toggle(
-                                    "set-autohide",
-                                    auto_hide,
-                                    cx.listener(|this, _, _, cx| {
-                                        this.settings.auto_hide_controls =
-                                            !this.settings.auto_hide_controls;
-                                        this.settings.save();
-                                        cx.notify();
-                                    }),
-                                ),
-                            ))
-                            .child(
-                                div()
-                                    .pt_1()
-                                    .pb_1()
-                                    .text_xs()
-                                    .text_color(theme::muted())
-                                    .child("Default speed"),
-                            )
-                            .child(div().flex().items_center().gap_1().children(
-                                util::SPEED_PRESETS.iter().copied().map(|preset| {
-                                    settings::choice_chip(
-                                        format!("speed-{preset}"),
-                                        format_speed(preset),
-                                        (preset - speed).abs() < 0.01,
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.set_speed(preset, cx)
-                                        }),
-                                    )
-                                }),
-                            ))
-                            .child(settings::section_label("AUDIO"))
-                            .child(
-                                div()
-                                    .pt_1()
-                                    .pb_1()
-                                    .text_xs()
-                                    .text_color(theme::muted())
-                                    .child("Default volume"),
-                            )
-                            .child(div().flex().items_center().gap_1().children(
-                                settings::VOLUME_PRESETS.iter().copied().map(|preset| {
-                                    settings::choice_chip(
-                                        format!("vol-{preset}"),
-                                        format!("{}%", (preset * 100.0).round() as i32),
-                                        (preset - volume).abs() < 0.01,
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.muted = false;
-                                            this.set_volume(preset, cx);
-                                        }),
-                                    )
-                                }),
-                            ))
-                            .child(settings::section_label("SUBTITLES"))
-                            .child(settings::setting_row(
-                                "Show by default",
-                                settings::toggle(
-                                    "set-subs",
-                                    subs_on,
-                                    cx.listener(|this, _, _, cx| {
-                                        this.settings.subtitle_enabled =
-                                            !this.settings.subtitle_enabled;
-                                        this.settings.save();
-                                        if let Some(session) = this.subtitles.as_mut() {
-                                            session.refresh_tracks();
-                                            if this.settings.subtitle_enabled {
-                                                if session.current().is_none() {
-                                                    if let Some(track) = session.tracks().first() {
-                                                        let index = track.index;
-                                                        session.set_current(Some(index));
-                                                    }
-                                                }
-                                            } else {
-                                                session.set_current(None);
-                                            }
-                                        }
-                                        cx.notify();
-                                    }),
-                                ),
-                            ))
-                            .child(settings::setting_row(
-                                "Background",
-                                settings::toggle(
-                                    "set-subs-bg",
-                                    subs_bg,
-                                    cx.listener(|this, _, _, cx| {
-                                        this.settings.subtitle_background =
-                                            !this.settings.subtitle_background;
-                                        this.settings.save();
-                                        cx.notify();
-                                    }),
-                                ),
-                            ))
-                            .child(settings::setting_row(
-                                "Default size",
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(settings::choice_chip(
-                                        "sub-smaller".into(),
-                                        "A-",
-                                        false,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.settings.cycle_subtitle_size(false);
-                                            this.settings.save();
-                                            if let Some(session) = this.subtitles.as_ref() {
-                                                session
-                                                    .apply_font_size(this.settings.subtitle_size);
-                                            }
-                                            cx.notify();
-                                        }),
-                                    ))
-                                    .child(
-                                        div()
-                                            .w(px(40.))
-                                            .text_xs()
-                                            .text_color(theme::white())
-                                            .child(format!("{}px", subs_size as i32)),
-                                    )
-                                    .child(settings::choice_chip(
-                                        "sub-larger".into(),
-                                        "A+",
-                                        false,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.settings.cycle_subtitle_size(true);
-                                            this.settings.save();
-                                            if let Some(session) = this.subtitles.as_ref() {
-                                                session
-                                                    .apply_font_size(this.settings.subtitle_size);
-                                            }
-                                            cx.notify();
-                                        }),
-                                    )),
-                            )),
+                            .child(match tab {
+                                settings::SettingsTab::Playback => {
+                                    self.render_settings_playback(cx).into_any_element()
+                                }
+                                settings::SettingsTab::Subtitles => {
+                                    self.render_settings_subtitles(cx).into_any_element()
+                                }
+                                settings::SettingsTab::Danmaku => {
+                                    self.render_settings_danmaku(cx).into_any_element()
+                                }
+                            }),
                     ),
             )
+    }
+
+    fn render_settings_playback(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let autoplay = self.settings.autoplay;
+        let looping = self.settings.loop_playback;
+        let auto_hide = self.settings.auto_hide_controls;
+        let speed = self.settings.speed;
+        let volume = self.settings.volume;
+
+        div()
+            .flex()
+            .flex_col()
+            .child(settings::setting_row(
+                "Autoplay",
+                settings::toggle(
+                    "set-autoplay",
+                    autoplay,
+                    cx.listener(|this, _, _, cx| {
+                        this.settings.autoplay = !this.settings.autoplay;
+                        this.settings.save();
+                        cx.notify();
+                    }),
+                ),
+            ))
+            .child(settings::setting_row(
+                "Loop by default",
+                settings::toggle(
+                    "set-loop",
+                    looping,
+                    cx.listener(|this, _, _, cx| this.toggle_loop(cx)),
+                ),
+            ))
+            .child(settings::setting_row(
+                "Auto-hide controls",
+                settings::toggle(
+                    "set-autohide",
+                    auto_hide,
+                    cx.listener(|this, _, _, cx| {
+                        this.settings.auto_hide_controls = !this.settings.auto_hide_controls;
+                        this.settings.save();
+                        cx.notify();
+                    }),
+                ),
+            ))
+            .child(settings::section_label("SPEED"))
+            .child(div().flex().items_center().gap_1().children(
+                util::SPEED_PRESETS.iter().copied().map(|preset| {
+                    settings::choice_chip(
+                        format!("speed-{preset}"),
+                        format_speed(preset),
+                        (preset - speed).abs() < 0.01,
+                        cx.listener(move |this, _, _, cx| this.set_speed(preset, cx)),
+                    )
+                }),
+            ))
+            .child(settings::section_label("VOLUME"))
+            .child(div().flex().items_center().gap_1().children(
+                settings::VOLUME_PRESETS.iter().copied().map(|preset| {
+                    settings::choice_chip(
+                        format!("vol-{preset}"),
+                        format!("{}%", (preset * 100.0).round() as i32),
+                        (preset - volume).abs() < 0.01,
+                        cx.listener(move |this, _, _, cx| {
+                            this.muted = false;
+                            this.set_volume(preset, cx);
+                        }),
+                    )
+                }),
+            ))
+    }
+
+    fn render_settings_subtitles(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let subs_on = self.settings.subtitle_enabled;
+        let subs_bg = self.settings.subtitle_background;
+        let subs_size = self.settings.subtitle_size;
+
+        div()
+            .flex()
+            .flex_col()
+            .child(settings::setting_row(
+                "Show by default",
+                settings::toggle(
+                    "set-subs",
+                    subs_on,
+                    cx.listener(|this, _, _, cx| {
+                        this.settings.subtitle_enabled = !this.settings.subtitle_enabled;
+                        this.settings.save();
+                        if let Some(session) = this.subtitles.as_mut() {
+                            session.refresh_tracks();
+                            if this.settings.subtitle_enabled {
+                                if session.current().is_none() {
+                                    if let Some(track) = session.tracks().first() {
+                                        let index = track.index;
+                                        session.set_current(Some(index));
+                                    }
+                                }
+                            } else {
+                                session.set_current(None);
+                            }
+                        }
+                        cx.notify();
+                    }),
+                ),
+            ))
+            .child(settings::setting_row(
+                "Background",
+                settings::toggle(
+                    "set-subs-bg",
+                    subs_bg,
+                    cx.listener(|this, _, _, cx| {
+                        this.settings.subtitle_background = !this.settings.subtitle_background;
+                        this.settings.save();
+                        cx.notify();
+                    }),
+                ),
+            ))
+            .child(settings::setting_row(
+                "Default size",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(settings::choice_chip(
+                        "sub-smaller".into(),
+                        "A-",
+                        false,
+                        cx.listener(|this, _, _, cx| {
+                            this.settings.cycle_subtitle_size(false);
+                            this.settings.save();
+                            if let Some(session) = this.subtitles.as_ref() {
+                                session.apply_font_size(this.settings.subtitle_size);
+                            }
+                            cx.notify();
+                        }),
+                    ))
+                    .child(
+                        div()
+                            .w(px(40.))
+                            .text_xs()
+                            .text_color(theme::white())
+                            .child(format!("{}px", subs_size as i32)),
+                    )
+                    .child(settings::choice_chip(
+                        "sub-larger".into(),
+                        "A+",
+                        false,
+                        cx.listener(|this, _, _, cx| {
+                            this.settings.cycle_subtitle_size(true);
+                            this.settings.save();
+                            if let Some(session) = this.subtitles.as_ref() {
+                                session.apply_font_size(this.settings.subtitle_size);
+                            }
+                            cx.notify();
+                        }),
+                    )),
+            ))
+    }
+
+    fn render_settings_danmaku(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let danmaku_on = self.settings.danmaku_enabled;
+        let danmaku_avoid = self.settings.danmaku_avoid_subtitles;
+        let danmaku_opacity = self.settings.danmaku_opacity;
+        let danmaku_speed = self.settings.danmaku_speed;
+        let danmaku_size = self.settings.danmaku_font_size;
+        let danmaku_density = self.settings.danmaku_density;
+        let danmaku_file = self
+            .danmaku
+            .as_ref()
+            .map(|session| format!("{} · {}", session.source_name, session.comments.len()))
+            .unwrap_or_else(|| "Drop a .xml / .json file".into());
+
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .pt_1()
+                    .pb_1()
+                    .text_xs()
+                    .text_color(theme::muted())
+                    .child(danmaku_file),
+            )
+            .child(settings::setting_row(
+                "Show danmaku",
+                settings::toggle(
+                    "set-danmaku",
+                    danmaku_on,
+                    cx.listener(|this, _, _, cx| this.toggle_danmaku(cx)),
+                ),
+            ))
+            .child(settings::setting_row(
+                "Keep off subtitles",
+                settings::toggle(
+                    "set-danmaku-avoid",
+                    danmaku_avoid,
+                    cx.listener(|this, _, _, cx| {
+                        this.settings.danmaku_avoid_subtitles =
+                            !this.settings.danmaku_avoid_subtitles;
+                        this.settings.save();
+                        cx.notify();
+                    }),
+                ),
+            ))
+            .child(settings::setting_row(
+                "Opacity",
+                div().flex().items_center().gap_1().children(
+                    settings::DANMAKU_OPACITY.iter().copied().map(|preset| {
+                        settings::choice_chip(
+                            format!("dm-op-{preset}"),
+                            format!("{}%", (preset * 100.0).round() as i32),
+                            (preset - danmaku_opacity).abs() < 0.05,
+                            cx.listener(move |this, _, _, cx| {
+                                this.settings.danmaku_opacity = preset;
+                                this.settings.save();
+                                cx.notify();
+                            }),
+                        )
+                    }),
+                ),
+            ))
+            .child(settings::setting_row(
+                "Speed",
+                div().flex().items_center().gap_1().children(
+                    settings::DANMAKU_SPEED.iter().copied().map(|preset| {
+                        let label = if (preset - 0.7).abs() < 0.05 {
+                            "Slow"
+                        } else if (preset - 1.4).abs() < 0.05 {
+                            "Fast"
+                        } else {
+                            "Normal"
+                        };
+                        settings::choice_chip(
+                            format!("dm-sp-{preset}"),
+                            label,
+                            (preset - danmaku_speed).abs() < 0.05,
+                            cx.listener(move |this, _, _, cx| {
+                                this.settings.danmaku_speed = preset;
+                                this.settings.save();
+                                cx.notify();
+                            }),
+                        )
+                    }),
+                ),
+            ))
+            .child(settings::setting_row(
+                "Density",
+                div().flex().items_center().gap_1().children(
+                    settings::DANMAKU_DENSITY.iter().copied().map(|preset| {
+                        let label = if preset < 0.5 {
+                            "Low"
+                        } else if preset > 0.85 {
+                            "High"
+                        } else {
+                            "Med"
+                        };
+                        settings::choice_chip(
+                            format!("dm-den-{preset}"),
+                            label,
+                            (preset - danmaku_density).abs() < 0.05,
+                            cx.listener(move |this, _, _, cx| {
+                                this.settings.danmaku_density = preset;
+                                this.settings.save();
+                                cx.notify();
+                            }),
+                        )
+                    }),
+                ),
+            ))
+            .child(settings::setting_row(
+                "Size",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(settings::choice_chip(
+                        "dm-smaller".into(),
+                        "A-",
+                        false,
+                        cx.listener(|this, _, _, cx| {
+                            this.settings.danmaku_font_size = Settings::cycle_choice(
+                                settings::DANMAKU_SIZES,
+                                this.settings.danmaku_font_size,
+                                false,
+                            );
+                            this.settings.save();
+                            cx.notify();
+                        }),
+                    ))
+                    .child(
+                        div()
+                            .w(px(40.))
+                            .text_xs()
+                            .text_color(theme::white())
+                            .child(format!("{}px", danmaku_size as i32)),
+                    )
+                    .child(settings::choice_chip(
+                        "dm-larger".into(),
+                        "A+",
+                        false,
+                        cx.listener(|this, _, _, cx| {
+                            this.settings.danmaku_font_size = Settings::cycle_choice(
+                                settings::DANMAKU_SIZES,
+                                this.settings.danmaku_font_size,
+                                true,
+                            );
+                            this.settings.save();
+                            cx.notify();
+                        }),
+                    )),
+            ))
     }
 
     fn render_top_bar(&self, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -1266,6 +1567,13 @@ impl Player {
                         self.looping,
                         false,
                         cx.listener(|this, _, _, cx| this.toggle_loop(cx)),
+                    ))
+                    .child(icon::text_button(
+                        "danmaku",
+                        "弹幕",
+                        self.settings.danmaku_enabled && self.danmaku.is_some(),
+                        self.danmaku.is_none(),
+                        cx.listener(|this, _, _, cx| this.toggle_danmaku(cx)),
                     ))
                     .child(icon::icon_button(
                         "captions",
